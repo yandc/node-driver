@@ -106,7 +106,7 @@ type simple struct {
 	lock     *sync.RWMutex
 	nodes    []*nodeWrapper
 	watchers []func([]Node)
-	startIdx atomic.Int32
+	startIdx int32
 }
 
 type nodeWrapper struct {
@@ -145,8 +145,9 @@ func (h *simple) PickFastest() (Node, error) {
 	if len(h.nodes) == 0 {
 		return nil, ErrRingEmpty
 	}
+	startIdx := atomic.LoadInt32(&h.startIdx)
 
-	return h.nodes[h.startIdx.Load()].node, nil
+	return h.nodes[startIdx].node, nil
 }
 
 func (h *simple) PickNth(nth int) (Node, error) {
@@ -157,11 +158,11 @@ func (h *simple) PickNth(nth int) (Node, error) {
 }
 
 func (h *simple) Failover() {
-	newIdx := h.startIdx.Add(1)
+	newIdx := atomic.AddInt32(&h.startIdx, 1)
 
 	// The ring is end and reset it to zero.
 	if int(newIdx) >= len(h.nodes) {
-		h.startIdx.Store(0)
+		atomic.StoreInt32(&h.startIdx, 0)
 	}
 }
 
@@ -191,7 +192,7 @@ func (h *simple) each(each func(i int, n *nodeWrapper) bool) error {
 		return ErrRingEmpty
 	}
 
-	startIdx := int(h.startIdx.Load())
+	startIdx := int(atomic.LoadInt32(&h.startIdx))
 	for i := 0; i < length; i++ {
 		idx := startIdx + i
 		if idx >= length {
@@ -318,5 +319,5 @@ func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 	}
 
 	// Reset the ring starts over.
-	h.startIdx.Store(0)
+	atomic.StoreInt32(&h.startIdx, 0)
 }
