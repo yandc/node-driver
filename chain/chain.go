@@ -91,8 +91,11 @@ type Transaction struct {
 
 // BlockHandler to handle block.
 type BlockHandler interface {
-	// How long does the system take to produce a block.
+	// BlockInterval returns how long the system take to produce a block.
 	BlockInterval() time.Duration
+
+	// BlockMayFork returns true if the block may be forked.
+	BlockMayFork() bool
 
 	OnBlock(client Clienter, block *Block) (TxHandler, error)
 
@@ -224,16 +227,18 @@ func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Bloc
 			return err
 		}
 
-		for b.isForkedBlock(curHeight, block) {
-			curHeight = curHeight - 1
+		if handler.BlockMayFork() {
+			for b.isForkedBlock(curHeight, block) {
+				curHeight = curHeight - 1
 
-			if err := handler.OnForkedBlock(client, block); err != nil {
-				return err
-			}
+				if err := handler.OnForkedBlock(client, block); err != nil {
+					return err
+				}
 
-			block, err = client.GetBlock(curHeight)
-			if err != nil {
-				return err
+				block, err = client.GetBlock(curHeight)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		return nil
