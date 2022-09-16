@@ -44,7 +44,7 @@ type Detector interface {
 	PickFastest() (Node, error)
 
 	// Failover the fastest node.
-	Failover()
+	Failover() (newNth int)
 
 	// WithRetry automaticlly retry with the detected priority.
 	WithRetry(maxRetry int, fn func(node Node) error) error
@@ -60,6 +60,9 @@ type Detector interface {
 
 	// Watch register a callback to watch nodes changed.
 	Watch(...func([]Node))
+
+	// WatchFailover register a callback to watch node had been failover.
+	WatchFailover(...func(current Node, next Node))
 
 	// StartDetectPlan a goroutine to detect which one is the fastest.
 	StartDetectPlan(interval time.Duration, lastActiveBegin, lastActiveEnd time.Duration)
@@ -103,10 +106,11 @@ func (in *WatchIn) URLNum() int {
 }
 
 type simple struct {
-	lock     *sync.RWMutex
-	nodes    []*nodeWrapper
-	watchers []func([]Node)
-	startIdx int32
+	lock       *sync.RWMutex
+	nodes      []*nodeWrapper
+	watchers   []func([]Node)
+	onFailover []func(Node, Node)
+	startIdx   int32
 }
 
 type nodeWrapper struct {
@@ -135,9 +139,10 @@ func (w *nodeWrapper) SetDetectElapsed(elapsed time.Duration) {
 // NewSimpleDetector create a simple contest.
 func NewSimpleDetector() Detector {
 	return &simple{
-		lock:     &sync.RWMutex{},
-		nodes:    make([]*nodeWrapper, 0, 4),
-		watchers: make([]func([]Node), 0, 4),
+		lock:       &sync.RWMutex{},
+		nodes:      make([]*nodeWrapper, 0, 4),
+		watchers:   make([]func([]Node), 0, 4),
+		onFailover: make([]func(Node, Node), 0, 4),
 	}
 }
 
@@ -157,13 +162,15 @@ func (h *simple) PickNth(nth int) (Node, error) {
 	return h.nodes[nth].node, nil
 }
 
-func (h *simple) Failover() {
+func (h *simple) Failover() int {
 	newIdx := atomic.AddInt32(&h.startIdx, 1)
 
 	// The ring is end and reset it to zero.
 	if int(newIdx) >= len(h.nodes) {
 		atomic.StoreInt32(&h.startIdx, 0)
+		return 0
 	}
+	return int(newIdx)
 }
 
 func (h *simple) Add(nodes ...Node) {
@@ -230,7 +237,10 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 		}
 
 		// mark current node unavailable.
-		h.Failover()
+		newIdx := h.Failover()
+		for _, f := range h.onFailover {
+			f(h.nodes[i].node, h.nodes[newIdx].node)
+		}
 		return false
 	})
 	if ret == nil {
@@ -255,6 +265,11 @@ func (h *simple) do(node Node, fn func(Node) error) (err error) {
 
 func (h *simple) Watch(watchers ...func([]Node)) {
 	h.watchers = append(h.watchers, watchers...)
+}
+
+func (h *simple) WatchFailover(watchers ...func(Node, Node)) {
+	h.onFailover = append(h.onFailover, watchers...)
+
 }
 
 func (h *simple) StartDetectPlan(interval time.Duration, lastActiveBegin, lastActiveEnd time.Duration) {
