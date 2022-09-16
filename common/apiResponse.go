@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
-	"strings"
 )
 
 type ApiResponse struct {
@@ -112,27 +111,4 @@ func (e CustomError) Error() string {
 // NoNeedRetry mark current error don't need retry.
 func (e CustomError) NeedRetry() {
 	e.needRetry = true
-}
-
-// NeedRetry returns true if the err need retry on next node.
-func NeedRetry(err error) bool {
-	s := err.Error()
-
-	if strings.Contains(s, NETWORK_ERROR) {
-		return true
-	}
-
-	if strings.Contains(s, TRANSACTION_FAILED) {
-		return true
-	}
-
-	if strings.Contains(s, REQUEST_BLOCKCHAIN_FAILED) {
-		return true
-	}
-
-	if cErr, ok := err.(CustomError); ok {
-		return cErr.needRetry
-	}
-
-	return false
 }
