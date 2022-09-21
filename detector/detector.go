@@ -191,9 +191,6 @@ func (h *simple) Each(each func(i int, n Node) bool) error {
 }
 
 func (h *simple) each(each func(i int, n *nodeWrapper) bool) error {
-	h.lock.RLock()
-	defer h.lock.RUnlock()
-
 	length := h.Len()
 	if length == 0 {
 		return ErrRingEmpty
@@ -205,12 +202,18 @@ func (h *simple) each(each func(i int, n *nodeWrapper) bool) error {
 		if idx >= length {
 			idx = idx - length
 		}
-		n := h.nodes[idx]
-		if terminate := each(i, n); terminate {
+
+		if terminate := each(i, h.nthNode(idx)); terminate {
 			return nil
 		}
 	}
 	return nil
+}
+
+func (h *simple) nthNode(idx int) *nodeWrapper {
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+	return h.nodes[idx]
 }
 
 func (h *simple) Len() int {
@@ -239,7 +242,7 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 		// mark current node unavailable.
 		newIdx := h.Failover()
 		for _, f := range h.onFailover {
-			f(h.nodes[i].node, h.nodes[newIdx].node)
+			f(node.node, h.nthNode(newIdx).node)
 		}
 		return false
 	})
@@ -290,6 +293,15 @@ func (h *simple) DetectAll() {
 }
 
 func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
+	h.doDetect(begin, end)
+
+	// Reset the ring starts over.
+	atomic.StoreInt32(&h.startIdx, 0)
+
+	h.notifyNodeChanged()
+}
+
+func (h *simple) doDetect(begin, end time.Duration) {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 
@@ -322,17 +334,17 @@ func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 	sort.Slice(h.nodes, func(i, j int) bool {
 		return h.nodes[i].DetectElapsed() < h.nodes[j].DetectElapsed() // Incr
 	})
+}
 
+func (h *simple) notifyNodeChanged() {
+	h.lock.RLock()
 	nodes := make([]Node, 0, len(h.nodes))
-
 	for _, n := range h.nodes {
 		nodes = append(nodes, n.node)
 	}
+	h.lock.RUnlock()
 
 	for _, w := range h.watchers {
 		w(nodes)
 	}
-
-	// Reset the ring starts over.
-	atomic.StoreInt32(&h.startIdx, 0)
 }
