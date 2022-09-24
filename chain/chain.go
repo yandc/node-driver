@@ -43,7 +43,7 @@ type Clienter interface {
 	GetBlockHeight() (uint64, error)
 
 	// GetTxByHash get transaction by given tx hash.
-	GetTxByHash(txHash string) (tx interface{}, isPending bool, err error)
+	GetTxByHash(txHash string) (tx *Transaction, err error)
 }
 
 // StateStore to store block height.
@@ -81,7 +81,6 @@ type Transaction struct {
 	Hash        string
 	Nonce       uint64
 	BlockNumber uint64
-	IsPending   bool
 	TxType      TxType
 	FromAddress string
 	ToAddress   string
@@ -116,10 +115,11 @@ type TxHandler interface {
 	// OnDroppedTx will be invoked when Clienter.GetTxByHash returns nil without error.
 	OnDroppedTx(client Clienter, block *Block, tx *Transaction) error
 
-	// OnSealedTx will be invoked when isPending of Clienter.GetTxByHash is false.
-	OnSealedTx(client Clienter, block *Block, tx *Transaction) error
+	// OnSealedTx will be invoked when Clienter.GetTxByHash returns non-nil without error.
+	OnSealedTx(client Clienter, block *Block, tx *Transaction, txByHashRaw interface{}) error
 
 	// Save will be invoked after muliple invocations of above.
+	// WILL NOT INVOKE CONCURRENTLY.
 	Save(client Clienter) error
 }
 
@@ -457,89 +457,100 @@ func (b *BlockSpider) handleTx(block *Block, handler BlockHandler) (txHandler Tx
 
 // SealPendingTransactions load pending transactions and try to seal them.
 func (b *BlockSpider) SealPendingTransactions(handler BlockHandler) {
-	txs, err := b.store.LoadPendingTxs()
-	if err != nil {
+	if err := b.doSealPendingTxs(handler); err != nil {
 		handler.OnError(err)
 	}
-	blocks := make(map[uint64]*Block)
+}
 
+func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
+	txs, err := b.store.LoadPendingTxs()
+	if err != nil {
+		return err
+	}
+
+	blocksStore := make(map[uint64]*Block)
 	for _, tx := range txs {
-		var txByHash interface{}
-		var isPending bool
-		err := b.withRetry(func(client Clienter) error {
-			var err error
-			txByHash, isPending, err = client.GetTxByHash(tx.Hash)
-			return handler.WrapsError(err)
-		})
-		if err != nil {
+		if err := b.sealOnePendingTx(handler, blocksStore, tx); err != nil {
 			handler.OnError(err)
 			continue
-		}
-		if isPending {
-			continue
-		}
-
-		var block *Block
-		if blk, ok := blocks[tx.BlockNumber]; ok {
-			block = blk
-		} else {
-			err = b.withRetry(func(client Clienter) error {
-				var err error
-				block, err = client.GetBlock(tx.BlockNumber)
-				return handler.WrapsError(err)
-			})
-			if err != nil {
-				handler.OnError(err)
-			}
-			blocks[tx.BlockNumber] = block
-		}
-
-		var txHandler TxHandler
-
-		err = b.withRetry(func(client Clienter) (err error) {
-			txHandler, err = handler.OnBlock(client, block)
-			return handler.WrapsError(err)
-		})
-		if err != nil {
-			handler.OnError(err)
-			continue
-		}
-
-		if txByHash == nil {
-			err = b.withRetry(func(client Clienter) error {
-				err := txHandler.OnDroppedTx(client, block, tx)
-				return handler.WrapsError(err)
-			})
-
-			if err != nil {
-				handler.OnError(err)
-			}
-			continue
-		}
-
-		err = b.withRetry(func(client Clienter) error {
-			for _, blkTx := range block.Transactions {
-				if tx.Hash == blkTx.Hash {
-					blkTx.Record = tx.Record
-					err := txHandler.OnSealedTx(client, block, blkTx)
-					return handler.WrapsError(err)
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			handler.OnError(err)
-			continue
-		}
-
-		err = b.withRetry(func(client Clienter) error {
-			err := txHandler.Save(client)
-			return handler.WrapsError(err)
-		})
-		if err != nil {
-			handler.OnError(err)
 		}
 	}
+	return nil
+}
+
+func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, blocksStore map[uint64]*Block, tx *Transaction) error {
+	var txByHash *Transaction
+	err := b.withRetry(func(client Clienter) error {
+		var err error
+		txByHash, err = client.GetTxByHash(tx.Hash)
+		return handler.WrapsError(err)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// Pending txs can be created by wallet, and its block number can be zero.
+	// So here we are using block number from chain.
+	curHeight := txByHash.BlockNumber
+
+	var block *Block
+
+	if blk, ok := blocksStore[curHeight]; ok {
+		block = blk
+	} else {
+		err = b.withRetry(func(client Clienter) error {
+			var err error
+			block, err = client.GetBlock(curHeight)
+			return handler.WrapsError(err)
+		})
+		if err != nil {
+			return err
+		}
+		blocksStore[curHeight] = block
+	}
+
+	var txHandler TxHandler
+
+	err = b.withRetry(func(client Clienter) (err error) {
+		txHandler, err = handler.OnBlock(client, block)
+		return handler.WrapsError(err)
+	})
+	if err != nil {
+		return err
+	}
+
+	if txByHash == nil {
+		err = b.withRetry(func(client Clienter) error {
+			err := txHandler.OnDroppedTx(client, block, tx)
+			return handler.WrapsError(err)
+		})
+
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	err = b.withRetry(func(client Clienter) error {
+		for _, blkTx := range block.Transactions {
+			if tx.Hash == blkTx.Hash {
+				blkTx.Record = tx.Record
+				err := txHandler.OnSealedTx(client, block, blkTx, txByHash.Raw)
+				return handler.WrapsError(err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	err = b.withRetry(func(client Clienter) error {
+		err := txHandler.Save(client)
+		return handler.WrapsError(err)
+	})
+	return err
 }
 
 func (b *BlockSpider) withRetry(fn func(client Clienter) error) error {
