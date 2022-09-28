@@ -9,9 +9,12 @@ type RetryErr struct {
 
 // Retry to wrap an error to retry.
 func Retry(err error) error {
-	return &RetryErr{
-		inner: err,
+	if err != nil {
+		return &RetryErr{
+			inner: err,
+		}
 	}
+	return nil
 }
 
 // Error returns inner error.
@@ -21,6 +24,10 @@ func (e *RetryErr) Error() string {
 
 // NeedRetry returns true if the err need retry on next node.
 func NeedRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+
 	if _, ok := err.(*RetryErr); ok {
 		return true
 	}
