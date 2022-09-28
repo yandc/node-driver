@@ -152,14 +152,14 @@ func (h *simple) PickFastest() (Node, error) {
 	}
 	startIdx := atomic.LoadInt32(&h.startIdx)
 
-	return h.nodes[startIdx].node, nil
+	return h.nthNode(int(startIdx)).node, nil
 }
 
 func (h *simple) PickNth(nth int) (Node, error) {
 	if nth >= len(h.nodes) {
 		return nil, ErrRingOverflow
 	}
-	return h.nodes[nth].node, nil
+	return h.nthNode(nth).node, nil
 }
 
 func (h *simple) Failover() int {
@@ -185,12 +185,12 @@ func (h *simple) Add(nodes ...Node) {
 }
 
 func (h *simple) Each(each func(i int, n Node) bool) error {
-	return h.each(func(i int, n *nodeWrapper) bool {
+	return h.each(func(i int, idx int, n *nodeWrapper) bool {
 		return each(i, n.node)
 	})
 }
 
-func (h *simple) each(each func(i int, n *nodeWrapper) bool) error {
+func (h *simple) each(each func(i int, idx int, n *nodeWrapper) bool) error {
 	length := h.Len()
 	if length == 0 {
 		return ErrRingEmpty
@@ -203,7 +203,7 @@ func (h *simple) each(each func(i int, n *nodeWrapper) bool) error {
 			idx = idx - length
 		}
 
-		if terminate := each(i, h.nthNode(idx)); terminate {
+		if terminate := each(i, idx, h.nthNode(idx)); terminate {
 			return nil
 		}
 	}
@@ -223,7 +223,7 @@ func (h *simple) Len() int {
 }
 
 func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
-	err := h.each(func(i int, node *nodeWrapper) (terminate bool) {
+	err := h.each(func(i int, idx int, node *nodeWrapper) (terminate bool) {
 		if i >= maxRetry {
 			return true // terminate
 		}
@@ -239,10 +239,13 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 			return true // terminate Each
 		}
 
-		// mark current node unavailable.
-		newIdx := h.Failover()
-		for _, f := range h.onFailover {
-			f(node.node, h.nthNode(newIdx).node)
+		// Mark current node unavailable.
+		// Skip if current node is already failovered: fit in invoking concurrently.
+		if idx == int(atomic.LoadInt32(&h.startIdx)) {
+			newIdx := h.Failover()
+			for _, f := range h.onFailover {
+				f(node.node, h.nthNode(newIdx).node)
+			}
 		}
 		return false
 	})
