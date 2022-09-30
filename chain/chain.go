@@ -76,6 +76,8 @@ type Block struct {
 	BaseFee    string
 	Time       int64
 
+	Raw interface{}
+
 	Transactions []*Transaction
 }
 
