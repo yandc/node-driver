@@ -104,7 +104,7 @@ type BlockHandler interface {
 	BlockMayFork() bool
 
 	// OnNewBlock will be invoked when crawl new block.
-	OnNewBlock(client Clienter, block *Block) (TxHandler, error)
+	OnNewBlock(client Clienter, chainHeight uint64, block *Block) (TxHandler, error)
 
 	// CreateTxHandler create TxHandler directly without a block.
 	// Will be invoked when seal pending txs and tx is not on the chain.
@@ -115,10 +115,16 @@ type BlockHandler interface {
 
 	// OnError will be invoked when error occurred.
 	// Returns true will ignore current block.
-	OnError(err error) (incrHeight bool)
+	OnError(err error, optHeight ...HeightInfo) (incrHeight bool)
 
 	// WrapsError wraps error to control when to retry.
 	WrapsError(err error) error
+}
+
+// HeightInfo info of heights.
+type HeightInfo struct {
+	ChainHeight uint64
+	CurHeight   uint64
 }
 
 // TxHandler to handle txs.
@@ -127,10 +133,10 @@ type TxHandler interface {
 	OnNewTx(client Clienter, block *Block, tx *Transaction) error
 
 	// OnDroppedTx will be invoked when Clienter.GetTxByHash returns nil without error.
-	OnDroppedTx(client Clienter, block *Block, tx *Transaction) error
+	OnDroppedTx(client Clienter, tx *Transaction) error
 
 	// OnSealedTx will be invoked when Clienter.GetTxByHash returns non-nil without error.
-	OnSealedTx(client Clienter, block *Block, tx *Transaction, txByHashRaw interface{}) error
+	OnSealedTx(client Clienter, tx *Transaction, txByHashRaw interface{}) error
 
 	// Save will be invoked after muliple invocations of above.
 	// WILL NOT INVOKE CONCURRENTLY.
@@ -172,7 +178,7 @@ func (opt getBlocksOpt) safelyConcurrent() bool {
 		return false
 	}
 
-	return opt.heightDelta() >= opt.concurrentDeltaThr
+	return opt.heightDelta() > opt.concurrentDeltaThr
 }
 
 func (opt getBlocksOpt) concurrency() int {
@@ -180,7 +186,7 @@ func (opt getBlocksOpt) concurrency() int {
 		return 1
 	}
 
-	concurrency := opt.heightDelta()
+	concurrency := opt.heightDelta() - opt.concurrentDeltaThr
 	if concurrency > opt.maxConcurrency {
 		concurrency = opt.maxConcurrency
 	}
@@ -225,6 +231,7 @@ func (b *BlockSpider) StartIndexBlock(handler BlockHandler, concurrentDeltaThr i
 	go b.detector.StartDetectPlan(20*time.Minute, 10*time.Minute, math.MaxInt64)
 
 	for {
+	_START:
 		height, curHeight, err := b.getHeights(handler)
 		if err != nil {
 			handler.OnError(err)
@@ -238,43 +245,52 @@ func (b *BlockSpider) StartIndexBlock(handler BlockHandler, concurrentDeltaThr i
 			continue
 		}
 
-		opt := getBlocksOpt{
-			localHeight:        curHeight,
-			chainHeight:        height,
-			concurrentDeltaThr: concurrentDeltaThr,
-			maxConcurrency:     maxConcurrency,
-		}
+		for curHeight <= height {
+			opt := getBlocksOpt{
+				localHeight:        curHeight,
+				chainHeight:        height,
+				concurrentDeltaThr: concurrentDeltaThr,
+				maxConcurrency:     maxConcurrency,
+			}
 
-		indexedBlockNum, storeHeight := b.doIndexBlocks(handler, &opt)
+			indexedBlockNum, storeHeight := b.doIndexBlocks(handler, height, &opt)
 
-		if !storeHeight {
-			continue
-		}
+			if !storeHeight {
+				goto _START
+			}
 
-		if err := b.store.StoreHeight(opt.localHeight + uint64(indexedBlockNum)); err != nil {
-			handler.OnError(err)
-			continue
+			if err := b.store.StoreHeight(opt.localHeight + uint64(indexedBlockNum)); err != nil {
+				handler.OnError(err, HeightInfo{
+					ChainHeight: opt.chainHeight,
+					CurHeight:   opt.localHeight,
+				})
+				goto _START
+			}
+			curHeight += uint64(indexedBlockNum)
 		}
 	}
 }
 
-func (b *BlockSpider) handleErrs(handler BlockHandler, errs []error) (storeHeight bool) {
+func (b *BlockSpider) handleErrs(handler BlockHandler, errs map[uint64]error, opt *getBlocksOpt) (storeHeight bool) {
 	storeHeight = true
-	for _, err := range errs {
-		storeHeight = storeHeight && handler.OnError(err)
+	for curHeight, err := range errs {
+		storeHeight = storeHeight && handler.OnError(err, HeightInfo{
+			ChainHeight: opt.chainHeight,
+			CurHeight:   curHeight,
+		})
 	}
 	return storeHeight
 }
 
-func (b *BlockSpider) doIndexBlocks(handler BlockHandler, opt *getBlocksOpt) (indexedBlockNum int, storeHeight bool) {
+func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, opt *getBlocksOpt) (indexedBlockNum int, storeHeight bool) {
 	blocks, errs := b.getBlocks(opt, handler)
 
-	if !b.handleErrs(handler, errs) {
+	if !b.handleErrs(handler, errs, opt) {
 		return 0, false
 	}
 	indexedBlockNum = len(blocks) + len(errs)
 
-	errs = make([]error, 0, len(blocks))
+	errs = make(map[uint64]error)
 
 	txHandlers := make([]*blockTxHandler, 0, len(blocks))
 	var (
@@ -286,13 +302,13 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, opt *getBlocksOpt) (in
 		wg.Add(1)
 		go func(block *Block) {
 			defer wg.Done()
-			txHandler, err := b.handleTx(block, handler)
+			txHandler, err := b.handleTx(block, chainHeight, handler)
 
 			lock.Lock()
 			defer lock.Unlock()
 
 			if err != nil {
-				errs = append(errs, err)
+				errs[block.Number] = err
 				return
 			}
 
@@ -305,7 +321,7 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, opt *getBlocksOpt) (in
 
 	wg.Wait()
 
-	if !b.handleErrs(handler, errs) {
+	if !b.handleErrs(handler, errs, opt) {
 		return 0, false
 	}
 
@@ -322,17 +338,17 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, opt *getBlocksOpt) (in
 			return handler.WrapsError(txHandler.inner.Save(client))
 		})
 		if err != nil {
-			errs = append(errs, err)
+			errs[txHandler.block.Number] = err
 		}
 	}
 
 	// 保存对应块高 hash
 	for _, blk := range blocks {
 		if err := b.store.StoreBlockHash(blk.Number, blk.Hash); err != nil {
-			errs = append(errs, err)
+			errs[blk.Number] = err
 		}
 	}
-	if !b.handleErrs(handler, errs) {
+	if !b.handleErrs(handler, errs, opt) {
 		return 0, false
 	}
 	return indexedBlockNum, true
@@ -353,21 +369,21 @@ func (b *BlockSpider) getHeights(handler BlockHandler) (height, curHeight uint64
 	return
 }
 
-func (b *BlockSpider) getBlocks(opt *getBlocksOpt, handler BlockHandler) ([]*Block, []error) {
-	if opt.safelyConcurrent() {
+func (b *BlockSpider) getBlocks(opt *getBlocksOpt, handler BlockHandler) ([]*Block, map[uint64]error) {
+	if opt.safelyConcurrent() && opt.concurrency() > 1 {
 		return b.concurrentGetBlocks(opt.localHeight, opt.chainHeight, handler, opt.concurrency())
 	}
-	errs := make([]error, 0, 1)
+	errs := make(map[uint64]error)
 	block, err := b.getBlock(opt.localHeight, handler)
 	if err != nil {
-		errs = append(errs, err)
+		errs[opt.localHeight] = err
 		return nil, errs
 	}
 	if handler.BlockMayFork() {
 		var newHeight uint64
 		block, newHeight, err = b.handleBlockMayFork(opt.localHeight, handler, block)
 		if err != nil {
-			errs = append(errs, err)
+			errs[opt.localHeight] = err
 			return nil, errs
 		}
 		// 从新的块高开始重新爬取getBlocks
@@ -381,11 +397,11 @@ func (b *BlockSpider) getBlocks(opt *getBlocksOpt, handler BlockHandler) ([]*Blo
 // 1. Start multiple goroutines to get blocks;
 // 2. Sort the blocks in incr order;
 // 3. Store hashes of the blocks to the store;
-func (b *BlockSpider) concurrentGetBlocks(curHeight, height uint64, handler BlockHandler, concurrency int) ([]*Block, []error) {
+func (b *BlockSpider) concurrentGetBlocks(curHeight, height uint64, handler BlockHandler, concurrency int) ([]*Block, map[uint64]error) {
 	var wg sync.WaitGroup
 	var lock sync.Mutex
 	blocks := make([]*Block, 0, concurrency)
-	errs := make([]error, 0, concurrency)
+	errs := make(map[uint64]error)
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -396,7 +412,7 @@ func (b *BlockSpider) concurrentGetBlocks(curHeight, height uint64, handler Bloc
 			lock.Lock()
 			defer lock.Unlock()
 			if err != nil {
-				errs = append(errs, err)
+				errs[height] = err
 				return
 			}
 			blocks = append(blocks, block)
@@ -434,7 +450,7 @@ func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, in
 			if err := handler.OnForkedBlock(client, block); err != nil {
 				return handler.WrapsError(err)
 			}
-
+			// TODO: Store height.
 			block, err = client.GetBlock(curHeight)
 			if err != nil {
 				return handler.WrapsError(err)
@@ -454,9 +470,9 @@ func (b *BlockSpider) isForkedBlock(height uint64, block *Block) bool {
 	return curPreBlockHash != "" && curPreBlockHash != preHash
 }
 
-func (b *BlockSpider) handleTx(block *Block, handler BlockHandler) (txHandler TxHandler, err error) {
+func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHandler) (txHandler TxHandler, err error) {
 	err = b.WithRetry(func(client Clienter) (err error) {
-		txHandler, err = handler.OnNewBlock(client, block)
+		txHandler, err = handler.OnNewBlock(client, chainHeight, block)
 		return handler.WrapsError(err)
 	})
 
@@ -488,7 +504,6 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 		return err
 	}
 
-	blocksStore := make(map[uint64]*Block)
 	for _, tx := range txs {
 		var txHandler TxHandler
 
@@ -501,7 +516,7 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 			handler.OnError(err)
 			continue
 		}
-		if err := b.sealOnePendingTx(handler, txHandler, blocksStore, tx); err != nil {
+		if err := b.sealOnePendingTx(handler, txHandler, tx); err != nil {
 			handler.OnError(err)
 			continue
 		}
@@ -518,7 +533,7 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 	return nil
 }
 
-func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler, blocksStore map[uint64]*Block, tx *Transaction) error {
+func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler, tx *Transaction) error {
 	var txByHash *Transaction
 	err := b.WithRetry(func(client Clienter) error {
 		var err error
@@ -529,11 +544,10 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 	if err != nil {
 		return err
 	}
-	var block *Block
 
 	if txByHash == nil {
 		err = b.WithRetry(func(client Clienter) error {
-			err := txHandler.OnDroppedTx(client, block, tx)
+			err := txHandler.OnDroppedTx(client, tx)
 			return handler.WrapsError(err)
 		})
 
@@ -541,35 +555,11 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 			return err
 		}
 		return nil
-	}
-
-	// Pending txs can be created by wallet, and its block number can be zero.
-	// So here we are using block number from chain.
-	curHeight := txByHash.BlockNumber
-
-	if blk, ok := blocksStore[curHeight]; ok {
-		block = blk
-	} else {
-		err = b.WithRetry(func(client Clienter) error {
-			var err error
-			block, err = client.GetBlock(curHeight)
-			return handler.WrapsError(err)
-		})
-		if err != nil {
-			return err
-		}
-		blocksStore[curHeight] = block
 	}
 
 	err = b.WithRetry(func(client Clienter) error {
-		for _, blkTx := range block.Transactions {
-			if tx.Hash == blkTx.Hash {
-				blkTx.Record = tx.Record
-				err := txHandler.OnSealedTx(client, block, blkTx, txByHash.Raw)
-				return handler.WrapsError(err)
-			}
-		}
-		return nil
+		err := txHandler.OnSealedTx(client, tx, txByHash.Raw)
+		return handler.WrapsError(err)
 	})
 	return err
 }

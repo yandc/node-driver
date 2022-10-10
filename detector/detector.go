@@ -114,26 +114,26 @@ type simple struct {
 }
 
 type nodeWrapper struct {
-	node          Node
-	detectElapsed time.Duration
-	detectedAt    time.Time
+	node            Node
+	detectElapsedMS int64
+	detectedAt      int64
 }
 
 func (w *nodeWrapper) DetectedAt() time.Time {
-	return w.detectedAt
+	return time.Unix(atomic.LoadInt64(&w.detectedAt), 0)
 }
 
 func (w *nodeWrapper) UpdateDetectedAt() {
-	w.detectedAt = time.Now()
+	atomic.StoreInt64(&w.detectedAt, time.Now().Unix())
 }
 
 func (w *nodeWrapper) DetectElapsed() time.Duration {
-	return w.detectElapsed
+	return time.Duration(time.Millisecond * time.Duration(atomic.LoadInt64(&w.detectElapsedMS)))
 }
 
 func (w *nodeWrapper) SetDetectElapsed(elapsed time.Duration) {
-	w.detectElapsed = elapsed
-	w.detectedAt = time.Now()
+	atomic.StoreInt64(&w.detectElapsedMS, int64(elapsed/time.Millisecond))
+	w.UpdateDetectedAt()
 }
 
 // NewSimpleDetector create a simple contest.
@@ -296,7 +296,16 @@ func (h *simple) DetectAll() {
 }
 
 func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
-	h.doDetect(begin, end)
+	nodes := h.copyNodeWrappers()
+	nodes = h.doDetect(nodes, begin, end)
+
+	h.lock.Lock()
+	// No new node has been added, it's safe to override,
+	// as we're not support remove or replace node yet.
+	if len(h.nodes) != len(nodes) {
+		h.nodes = nodes
+	}
+	h.lock.Unlock()
 
 	// Reset the ring starts over.
 	atomic.StoreInt32(&h.startIdx, 0)
@@ -304,13 +313,10 @@ func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 	h.notifyNodeChanged()
 }
 
-func (h *simple) doDetect(begin, end time.Duration) {
-	h.lock.Lock()
-	defer h.lock.Unlock()
-
+func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nodeWrapper {
 	wg := &sync.WaitGroup{}
 
-	for idx, n := range h.nodes {
+	for idx, n := range nodes {
 		detectedAt := n.DetectedAt()
 		if !detectedAt.IsZero() {
 			sinceLastActive := time.Now().Sub(detectedAt)
@@ -334,20 +340,35 @@ func (h *simple) doDetect(begin, end time.Duration) {
 	wg.Wait()
 
 	// Sort by elapsed time in incr order.
-	sort.Slice(h.nodes, func(i, j int) bool {
-		return h.nodes[i].DetectElapsed() < h.nodes[j].DetectElapsed() // Incr
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].DetectElapsed() < nodes[j].DetectElapsed() // Incr
 	})
+	return nodes
 }
 
 func (h *simple) notifyNodeChanged() {
-	h.lock.RLock()
-	nodes := make([]Node, 0, len(h.nodes))
-	for _, n := range h.nodes {
-		nodes = append(nodes, n.node)
-	}
-	h.lock.RUnlock()
+	nodes := h.copyNodes()
 
 	for _, w := range h.watchers {
 		w(nodes)
 	}
+}
+
+func (h *simple) copyNodes() []Node {
+	wrappers := h.copyNodeWrappers()
+	nodes := make([]Node, 0, len(wrappers))
+	for _, w := range wrappers {
+		nodes = append(nodes, w.node)
+	}
+	return nodes
+}
+
+func (h *simple) copyNodeWrappers() []*nodeWrapper {
+	h.lock.RLock()
+	defer h.lock.RUnlock()
+	nodes := make([]*nodeWrapper, 0, len(h.nodes))
+	for _, n := range h.nodes {
+		nodes = append(nodes, n)
+	}
+	return nodes
 }
