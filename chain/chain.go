@@ -136,7 +136,7 @@ type TxHandler interface {
 	OnDroppedTx(client Clienter, tx *Transaction) error
 
 	// OnSealedTx will be invoked when Clienter.GetTxByHash returns non-nil without error.
-	OnSealedTx(client Clienter, tx *Transaction, txByHashRaw interface{}) error
+	OnSealedTx(client Clienter, tx *Transaction) error
 
 	// Save will be invoked after muliple invocations of above.
 	// WILL NOT INVOKE CONCURRENTLY.
@@ -358,8 +358,11 @@ func (b *BlockSpider) getHeights(handler BlockHandler) (height, curHeight uint64
 	err = b.WithRetry(func(client Clienter) error {
 		height, err = client.GetBlockHeight()
 		return handler.WrapsError(err)
-
 	})
+
+	if err != nil {
+		return
+	}
 
 	curHeight, err = b.store.LoadHeight()
 	if err == ErrNoCurrentHeight {
@@ -557,8 +560,10 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 		return nil
 	}
 
+	txByHash.Record = tx.Record
+
 	err = b.WithRetry(func(client Clienter) error {
-		err := txHandler.OnSealedTx(client, tx, txByHash.Raw)
+		err := txHandler.OnSealedTx(client, txByHash)
 		return handler.WrapsError(err)
 	})
 	return err

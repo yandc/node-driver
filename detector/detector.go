@@ -30,6 +30,9 @@ type Node interface {
 
 	// URL returns url of node.
 	URL() string
+
+	// Recover handle panic.
+	Recover(r interface{}) error
 }
 
 // Detector detector to detect nodes.
@@ -258,14 +261,10 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 func (h *simple) do(node Node, fn func(Node) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if strValue, ok := r.(string); ok {
-				err = errors.New(strValue)
-			} else if errValue, ok := r.(error); ok {
-				err = errValue
-			}
-			return
+			err = node.Recover(r)
 		}
 	}()
+
 	return fn(node)
 }
 
