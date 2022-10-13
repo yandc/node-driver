@@ -147,6 +147,7 @@ type TxHandler interface {
 type DetectorWatcher interface {
 	OnNodesChange([]detector.Node)
 	OnNodeFailover(current detector.Node, next detector.Node)
+	OnNodeSuccess(node detector.Node)
 }
 
 // BlockSpider block spider to crawl blocks from chain.
@@ -217,6 +218,7 @@ func (b *BlockSpider) WatchDetector(watchers ...DetectorWatcher) {
 	for _, w := range watchers {
 		b.detector.Watch(w.OnNodesChange)
 		b.detector.WatchFailover(w.OnNodeFailover)
+		b.detector.WatchSuccess(w.OnNodeSuccess)
 	}
 }
 
