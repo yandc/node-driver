@@ -2,8 +2,10 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,9 @@ import (
 var (
 	// ErrNoCurrentHeight can't load height from cache or DB.
 	ErrNoCurrentHeight = errors.New("we don't start yet, go from the newest height")
+
+	// ErrSlowBlockHandling slow block handling
+	ErrSlowBlockHandling = errors.New("slow block handling")
 )
 
 // TxType transaction type.
@@ -79,6 +84,7 @@ type Block struct {
 	Raw interface{}
 
 	Transactions []*Transaction
+	Metrics      []*Metric
 }
 
 // Transaction transaction.
@@ -93,6 +99,19 @@ type Transaction struct {
 
 	Raw    interface{}
 	Record interface{}
+}
+
+// Metric metric
+type Metric struct {
+	Stage    string
+	NodeURLs []string
+	Begin    time.Time
+	End      time.Time
+}
+
+// Elapsed .
+func (m *Metric) Elapsed() time.Duration {
+	return m.End.Sub(m.Begin)
 }
 
 // BlockHandler to handle block.
@@ -247,7 +266,13 @@ func (b *BlockSpider) StartIndexBlock(handler BlockHandler, concurrentDeltaThr i
 			continue
 		}
 
-		for curHeight <= height {
+		// 1000 个块之后重新获取链上块高。
+		nextHeight := height
+		if nextHeight-curHeight > 1000 {
+			nextHeight = curHeight + 1000
+		}
+
+		for curHeight <= nextHeight {
 			opt := getBlocksOpt{
 				localHeight:        curHeight,
 				chainHeight:        height,
@@ -304,7 +329,13 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 		wg.Add(1)
 		go func(block *Block) {
 			defer wg.Done()
+			start := time.Now()
 			txHandler, err := b.handleTx(block, chainHeight, handler)
+			block.Metrics = append(block.Metrics, &Metric{
+				Stage: "handleTx",
+				Begin: start,
+				End:   time.Now(),
+			})
 
 			lock.Lock()
 			defer lock.Unlock()
@@ -335,9 +366,15 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 	// XXX Using this style of for-loop to break when err is not nil.
 	for i := 0; i < len(txHandlers) && err == nil; i++ {
 		txHandler := txHandlers[i]
+		start := time.Now()
 
 		err = b.WithRetry(func(client Clienter) error {
 			return handler.WrapsError(txHandler.inner.Save(client))
+		})
+		txHandler.block.Metrics = append(txHandler.block.Metrics, &Metric{
+			Stage: "save",
+			Begin: start,
+			End:   time.Now(),
 		})
 		if err != nil {
 			errs[txHandler.block.Number] = err
@@ -346,9 +383,16 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 
 	// 保存对应块高 hash
 	for _, blk := range blocks {
+		start := time.Now()
 		if err := b.store.StoreBlockHash(blk.Number, blk.Hash); err != nil {
 			errs[blk.Number] = err
 		}
+		blk.Metrics = append(blk.Metrics, &Metric{
+			Stage: "storeHash",
+			Begin: start,
+			End:   time.Now(),
+		})
+		b.warnSlow(handler, blk)
 	}
 	if !b.handleErrs(handler, errs, opt) {
 		return 0, false
@@ -437,10 +481,21 @@ func (b *BlockSpider) concurrentGetBlocks(curHeight, height uint64, handler Bloc
 }
 
 func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Block, err error) {
+	start := time.Now()
+	nodeURLs := make([]string, 0, b.detector.Len())
 	err = b.WithRetry(func(client Clienter) error {
+		nodeURLs = append(nodeURLs, client.URL())
 		block, err = client.GetBlock(height)
 		return handler.WrapsError(err)
 	})
+	if block != nil {
+		block.Metrics = append(block.Metrics, &Metric{
+			Stage:    "retrieveBlock",
+			NodeURLs: nodeURLs,
+			Begin:    start,
+			End:      time.Now(),
+		})
+	}
 	return
 }
 
@@ -494,6 +549,34 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		}
 	}
 	return
+}
+
+func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
+	if len(block.Metrics) == 0 {
+		return
+	}
+	begin := block.Metrics[0].Begin
+	end := block.Metrics[len(block.Metrics)-1].End
+	thr := 5 * time.Second
+	if end.Sub(begin) < thr {
+		return
+	}
+
+	builder := strings.Builder{}
+	var prevMetric *Metric
+	for _, m := range block.Metrics {
+		if prevMetric != nil {
+			builder.WriteString(fmt.Sprintf(" -- %dms --> ", m.Begin.Sub(prevMetric.End)/time.Millisecond))
+		}
+		builder.WriteString(fmt.Sprintf("%s (%dms)", m.Stage, m.Elapsed()/time.Millisecond))
+		prevMetric = m
+	}
+	handler.OnError(
+		fmt.Errorf("[total elapsed %dms: %s] %w", end.Sub(begin)/time.Millisecond, builder.String(), ErrSlowBlockHandling),
+		HeightInfo{
+			CurHeight: block.Number,
+		},
+	)
 }
 
 // SealPendingTransactions load pending transactions and try to seal them.
