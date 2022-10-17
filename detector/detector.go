@@ -67,6 +67,9 @@ type Detector interface {
 	// WatchFailover register a callback to watch node had been failover.
 	WatchFailover(...func(current Node, next Node))
 
+	// WatchSuccess register a callback to watch node had been used successfully.
+	WatchSuccess(...func(node Node))
+
 	// StartDetectPlan a goroutine to detect which one is the fastest.
 	StartDetectPlan(interval time.Duration, lastActiveBegin, lastActiveEnd time.Duration)
 
@@ -113,6 +116,7 @@ type simple struct {
 	nodes      []*nodeWrapper
 	watchers   []func([]Node)
 	onFailover []func(Node, Node)
+	onSuccess  []func(Node)
 	startIdx   int32
 }
 
@@ -146,6 +150,7 @@ func NewSimpleDetector() Detector {
 		nodes:      make([]*nodeWrapper, 0, 4),
 		watchers:   make([]func([]Node), 0, 4),
 		onFailover: make([]func(Node, Node), 0, 4),
+		onSuccess:  make([]func(Node), 0, 4),
 	}
 }
 
@@ -234,6 +239,11 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 		if ret = h.do(node.node, fn); ret == nil {
 			// set detected to avoid detect in plan.
 			node.UpdateDetectedAt()
+
+			// Node have been used successfully.
+			for _, f := range h.onSuccess {
+				f(node.node)
+			}
 			return true // terminate Each
 
 		}
@@ -274,7 +284,10 @@ func (h *simple) Watch(watchers ...func([]Node)) {
 
 func (h *simple) WatchFailover(watchers ...func(Node, Node)) {
 	h.onFailover = append(h.onFailover, watchers...)
+}
 
+func (h *simple) WatchSuccess(watchers ...func(Node)) {
+	h.onSuccess = append(h.onSuccess, watchers...)
 }
 
 func (h *simple) StartDetectPlan(interval time.Duration, lastActiveBegin, lastActiveEnd time.Duration) {
