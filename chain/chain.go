@@ -511,9 +511,13 @@ func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, in
 				return handler.WrapsError(err)
 			}
 			// TODO: Store height.
-			block, err = client.GetBlock(curHeight)
-			if err != nil {
+			if blk, err := client.GetBlock(curHeight); err != nil {
 				return handler.WrapsError(err)
+			} else {
+				// 如果直接使用 block, err = client.GetBlock(curHeight) 这种方式，
+				// 且错误是可以重试的则会 block 变量设置为 nil，从而导致：
+				// runtime error: invalid memory address or nil pointer dereference
+				block = blk
 			}
 		}
 		return nil
