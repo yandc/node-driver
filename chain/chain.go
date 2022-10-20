@@ -137,7 +137,7 @@ type BlockHandler interface {
 	OnError(err error, optHeight ...HeightInfo) (incrHeight bool)
 
 	// WrapsError wraps error to control when to retry.
-	WrapsError(err error) error
+	WrapsError(client Clienter, err error) error
 }
 
 // HeightInfo info of heights.
@@ -369,7 +369,7 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 		start := time.Now()
 
 		err = b.WithRetry(func(client Clienter) error {
-			return handler.WrapsError(txHandler.inner.Save(client))
+			return handler.WrapsError(client, txHandler.inner.Save(client))
 		})
 		txHandler.block.Metrics = append(txHandler.block.Metrics, &Metric{
 			Stage: "save",
@@ -403,7 +403,7 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 func (b *BlockSpider) getHeights(handler BlockHandler) (height, curHeight uint64, err error) {
 	err = b.WithRetry(func(client Clienter) error {
 		height, err = client.GetBlockHeight()
-		return handler.WrapsError(err)
+		return handler.WrapsError(client, err)
 	})
 
 	if err != nil {
@@ -486,7 +486,7 @@ func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Bloc
 	err = b.WithRetry(func(client Clienter) error {
 		nodeURLs = append(nodeURLs, client.URL())
 		block, err = client.GetBlock(height)
-		return handler.WrapsError(err)
+		return handler.WrapsError(client, err)
 	})
 	if block != nil {
 		block.Metrics = append(block.Metrics, &Metric{
@@ -508,16 +508,17 @@ func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, in
 			curHeight = curHeight - 1
 
 			if err := handler.OnForkedBlock(client, block); err != nil {
-				return handler.WrapsError(err)
+				return handler.WrapsError(client, err)
 			}
 			// TODO: Store height.
 			if blk, err := client.GetBlock(curHeight); err != nil {
-				return handler.WrapsError(err)
+				return handler.WrapsError(client, err)
 			} else {
 				// 如果直接使用 block, err = client.GetBlock(curHeight) 这种方式，
 				// 且错误是可以重试的则会 block 变量设置为 nil，从而导致：
 				// runtime error: invalid memory address or nil pointer dereference
 				block = blk
+
 			}
 		}
 		return nil
@@ -537,7 +538,7 @@ func (b *BlockSpider) isForkedBlock(height uint64, block *Block) bool {
 func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHandler) (txHandler TxHandler, err error) {
 	err = b.WithRetry(func(client Clienter) (err error) {
 		txHandler, err = handler.OnNewBlock(client, chainHeight, block)
-		return handler.WrapsError(err)
+		return handler.WrapsError(client, err)
 	})
 
 	if err != nil {
@@ -601,7 +602,7 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 
 		err = b.WithRetry(func(client Clienter) (err error) {
 			txHandler, err = handler.CreateTxHandler(client, tx)
-			return handler.WrapsError(err)
+			return handler.WrapsError(client, err)
 		})
 
 		if err != nil {
@@ -615,7 +616,7 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 
 		err = b.WithRetry(func(client Clienter) error {
 			err := txHandler.Save(client)
-			return handler.WrapsError(err)
+			return handler.WrapsError(client, err)
 		})
 		if err != nil {
 			handler.OnError(err)
@@ -630,7 +631,7 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 	err := b.WithRetry(func(client Clienter) error {
 		var err error
 		txByHash, err = client.GetTxByHash(tx.Hash)
-		return handler.WrapsError(err)
+		return handler.WrapsError(client, err)
 	})
 
 	if err != nil {
@@ -640,7 +641,7 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 	if txByHash == nil {
 		err = b.WithRetry(func(client Clienter) error {
 			err := txHandler.OnDroppedTx(client, tx)
-			return handler.WrapsError(err)
+			return handler.WrapsError(client, err)
 		})
 
 		if err != nil {
@@ -653,7 +654,7 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 
 	err = b.WithRetry(func(client Clienter) error {
 		err := txHandler.OnSealedTx(client, txByHash)
-		return handler.WrapsError(err)
+		return handler.WrapsError(client, err)
 	})
 	return err
 }
