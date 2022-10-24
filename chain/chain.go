@@ -663,14 +663,16 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
 	i := 0
 	var err error
-	return b.detector.WithRetry(b.detector.Len(), func(node detector.Node) error {
-		i += 1
-		// Some error will not retry, so we move retry here before the invocation of fn.
-		// So there will be no sleep if the error don't need to retry.
-		if err != nil {
+	return b.detector.WithRetry(
+		b.detector.Len(),
+		func(node detector.Node) error {
+			err = fn(node.(Clienter))
+			return err
+		},
+		func(node detector.Node, err error) {
+			i += 1
 			time.Sleep(time.Duration(3*i) * time.Second)
-		}
-		err = fn(node.(Clienter))
-		return err
-	})
+
+		},
+	)
 }
