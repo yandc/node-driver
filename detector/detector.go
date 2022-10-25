@@ -50,7 +50,7 @@ type Detector interface {
 	Failover() (newNth int)
 
 	// WithRetry automaticlly retry with the detected priority.
-	WithRetry(maxRetry int, fn func(node Node) error) error
+	WithRetry(maxRetry int, fn func(node Node) error, onFailedNeedRetry ...func(Node, error)) error
 
 	// Each to iterate over nodes, returns true in the callback to terminate.
 	Each(func(i int, node Node) (terminate bool)) error
@@ -230,7 +230,7 @@ func (h *simple) Len() int {
 	return len(h.nodes)
 }
 
-func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
+func (h *simple) WithRetry(maxRetry int, fn func(Node) error, onFailedNeedRetry ...func(Node, error)) (ret error) {
 	err := h.each(func(i int, idx int, node *nodeWrapper) (terminate bool) {
 		if i >= maxRetry {
 			return true // terminate
@@ -250,6 +250,10 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 
 		if !common.NeedRetry(ret) {
 			return true // terminate Each
+		}
+
+		for _, f := range onFailedNeedRetry {
+			f(node.node, ret)
 		}
 
 		// Mark current node unavailable.
