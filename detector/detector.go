@@ -33,6 +33,10 @@ type Node interface {
 
 	// Recover handle panic.
 	Recover(r interface{}) error
+
+	// RetryAfter returns a timestamp indicates when this node is available to use.
+	// Returns 0 will be always available.
+	RetryAfter() time.Time
 }
 
 // Detector detector to detect nodes.
@@ -50,7 +54,10 @@ type Detector interface {
 	Failover() (newNth int)
 
 	// WithRetry automaticlly retry with the detected priority.
-	WithRetry(maxRetry int, fn func(node Node) error, onFailedNeedRetry ...func(Node, error)) error
+	WithRetry(maxRetry int, fn func(node Node) error) error
+
+	// EnableRoundRobin use all available nodes to invoke fn sequentially with retry.
+	EnableRoundRobin()
 
 	// Each to iterate over nodes, returns true in the callback to terminate.
 	Each(func(i int, node Node) (terminate bool)) error
@@ -118,12 +125,17 @@ type simple struct {
 	onFailover []func(Node, Node)
 	onSuccess  []func(Node)
 	startIdx   int32
+	roundRobin int32
 }
 
 type nodeWrapper struct {
 	node            Node
 	detectElapsedMS int64
 	detectedAt      int64
+
+	// set this when node failed but its RetryAfter hasn't changed accorrdingly.
+	defaultRetryAfter    *time.Time
+	numOfContinualFailed uint32
 }
 
 func (w *nodeWrapper) DetectedAt() time.Time {
@@ -132,6 +144,7 @@ func (w *nodeWrapper) DetectedAt() time.Time {
 
 func (w *nodeWrapper) UpdateDetectedAt() {
 	atomic.StoreInt64(&w.detectedAt, time.Now().Unix())
+	atomic.StoreUint32(&w.numOfContinualFailed, 0)
 }
 
 func (w *nodeWrapper) DetectElapsed() time.Duration {
@@ -141,6 +154,27 @@ func (w *nodeWrapper) DetectElapsed() time.Duration {
 func (w *nodeWrapper) SetDetectElapsed(elapsed time.Duration) {
 	atomic.StoreInt64(&w.detectElapsedMS, int64(elapsed/time.Millisecond))
 	w.UpdateDetectedAt()
+}
+
+func (w *nodeWrapper) retryAfter() time.Time {
+	if w.defaultRetryAfter != nil {
+		return *w.defaultRetryAfter
+	}
+	return w.node.RetryAfter()
+}
+
+func (w *nodeWrapper) failed() {
+	num := atomic.AddUint32(&w.numOfContinualFailed, 1)
+	if w.node.RetryAfter().UnixNano() < time.Now().UnixNano() {
+		// retry after not update accordingly, set defaultRetryAfter.
+		retryAfter := time.Now().Add(time.Second * time.Duration(1<<num))
+		w.defaultRetryAfter = &retryAfter
+	} else {
+		w.defaultRetryAfter = nil
+	}
+	if num >= 5 {
+		atomic.StoreUint32(&w.numOfContinualFailed, 0)
+	}
 }
 
 // NewSimpleDetector create a simple contest.
@@ -171,14 +205,18 @@ func (h *simple) PickNth(nth int) (Node, error) {
 }
 
 func (h *simple) Failover() int {
-	newIdx := atomic.AddInt32(&h.startIdx, 1)
+	idx := atomic.LoadInt32(&h.startIdx)
+	newIdx := idx + 1
 
 	// The ring is end and reset it to zero.
 	if int(newIdx) >= len(h.nodes) {
-		atomic.StoreInt32(&h.startIdx, 0)
-		return 0
+		newIdx = 0
 	}
-	return int(newIdx)
+	if atomic.CompareAndSwapInt32(&h.startIdx, idx, newIdx) {
+		return int(newIdx)
+	} else {
+		return int(atomic.LoadInt32(&h.startIdx))
+	}
 }
 
 func (h *simple) Add(nodes ...Node) {
@@ -199,19 +237,62 @@ func (h *simple) Each(each func(i int, n Node) bool) error {
 }
 
 func (h *simple) each(each func(i int, idx int, n *nodeWrapper) bool) error {
-	length := h.Len()
+	nodes := h.copyNodeWrappers()
+	length := len(nodes)
 	if length == 0 {
 		return ErrRingEmpty
 	}
 
 	startIdx := int(atomic.LoadInt32(&h.startIdx))
+	availableNodes := make([]*nodeWrapper, length)
+	var nextAvailNode *nodeWrapper
+	var anyNodeAvailable bool
+	now := time.Now()
+
 	for i := 0; i < length; i++ {
 		idx := startIdx + i
 		if idx >= length {
 			idx = idx - length
 		}
+		node := nodes[idx]
+		retryAfter := node.retryAfter()
+		if retryAfter.Sub(now) > 0 {
+			availableNodes[i] = nil
+		} else {
+			availableNodes[i] = node
+			anyNodeAvailable = true
+		}
+		if nextAvailNode == nil || nextAvailNode.retryAfter().UnixNano() > retryAfter.UnixNano() {
+			nextAvailNode = node
+		}
+	}
 
-		if terminate := each(i, idx, h.nthNode(idx)); terminate {
+	// no node is available.
+	if !anyNodeAvailable {
+		// sleep to wait node available.
+		time.Sleep(nextAvailNode.retryAfter().Sub(now))
+
+		// some nodes should be available after sleep, now add them as available nodes.
+		for i := 0; i < length; i++ {
+			idx := startIdx + i
+			if idx >= length {
+				idx = idx - length
+			}
+			node := nodes[idx]
+			// we only compare on seconds to make as many nodes available as possible.
+			if node.retryAfter().Unix() == nextAvailNode.retryAfter().Unix() {
+				availableNodes[i] = node
+			}
+		}
+	}
+
+	for i, node := range availableNodes {
+		if node == nil { // node unavailable will set be nil
+			continue
+		}
+
+		idx := startIdx + i
+		if terminate := each(i, idx, node); terminate {
 			return nil
 		}
 	}
@@ -230,11 +311,20 @@ func (h *simple) Len() int {
 	return len(h.nodes)
 }
 
-func (h *simple) WithRetry(maxRetry int, fn func(Node) error, onFailedNeedRetry ...func(Node, error)) (ret error) {
+func (h *simple) EnableRoundRobin() {
+	atomic.StoreInt32(&h.roundRobin, 1)
+}
+
+func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
+	if atomic.LoadInt32(&h.roundRobin) == 1 {
+		h.Failover() // failover to use a new node for round robin purpose.
+	}
+
 	err := h.each(func(i int, idx int, node *nodeWrapper) (terminate bool) {
 		if i >= maxRetry {
 			return true // terminate
 		}
+
 		// Invoke without error and we shall done the progress.
 		if ret = h.do(node.node, fn); ret == nil {
 			// set detected to avoid detect in plan.
@@ -247,13 +337,10 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error, onFailedNeedRetry 
 			return true // terminate Each
 
 		}
+		node.failed()
 
 		if !common.NeedRetry(ret) {
 			return true // terminate Each
-		}
-
-		for _, f := range onFailedNeedRetry {
-			f(node.node, ret)
 		}
 
 		// Mark current node unavailable.

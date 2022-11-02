@@ -229,6 +229,10 @@ func NewBlockSpider(store StateStore, clients ...Clienter) *BlockSpider {
 	}
 }
 
+func (b *BlockSpider) EnableRoundRobin() {
+	b.detector.EnableRoundRobin()
+}
+
 func (b *BlockSpider) Start(handler BlockHandler, concurrentDeltaThr int, maxConcurrency int) {
 	go b.StartIndexBlock(handler, concurrentDeltaThr, maxConcurrency)
 }
@@ -661,18 +665,7 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 
 // WithRetry retry.
 func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
-	i := 0
-	var err error
-	return b.detector.WithRetry(
-		b.detector.Len(),
-		func(node detector.Node) error {
-			err = fn(node.(Clienter))
-			return err
-		},
-		func(node detector.Node, err error) {
-			i += 1
-			time.Sleep(time.Duration(3*i) * time.Second)
-
-		},
-	)
+	return b.detector.WithRetry(b.detector.Len(), func(node detector.Node) error {
+		return fn(node.(Clienter))
+	})
 }
