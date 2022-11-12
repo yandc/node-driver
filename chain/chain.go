@@ -172,6 +172,7 @@ type DetectorWatcher interface {
 // BlockSpider block spider to crawl blocks from chain.
 type BlockSpider struct {
 	detector detector.Detector
+	standby  detector.Detector
 	store    StateStore
 }
 
@@ -226,11 +227,20 @@ func NewBlockSpider(store StateStore, clients ...Clienter) *BlockSpider {
 	return &BlockSpider{
 		detector: d,
 		store:    store,
+		standby:  detector.NewSimpleDetector(),
 	}
 }
 
 func (b *BlockSpider) EnableRoundRobin() {
 	b.detector.EnableRoundRobin()
+}
+
+func (b *BlockSpider) AddStandby(clients ...Clienter) {
+	nodes := make([]detector.Node, 0, len(clients))
+	for _, c := range clients {
+		nodes = append(nodes, c)
+	}
+	b.standby.Add(nodes...)
 }
 
 func (b *BlockSpider) Start(handler BlockHandler, concurrentDeltaThr int, maxConcurrency int) {
@@ -665,7 +675,37 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 
 // WithRetry retry.
 func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
-	return b.detector.WithRetry(b.detector.Len(), func(node detector.Node) error {
+	err := b.detector.WithRetry(b.detector.Len(), func(node detector.Node) error {
 		return fn(node.(Clienter))
 	})
+	if err != nil {
+		if r, ok := err.(*RetryStandbyErr); ok {
+			if b.standby.Len() == 0 {
+				return r.inner
+			}
+			err = b.standby.WithRetry(b.standby.Len(), func(node detector.Node) error {
+				return fn(node.(Clienter))
+			})
+		}
+	}
+	return err
+}
+
+// RetryStandbyErr wraps error to retry on standby nodes.
+type RetryStandbyErr struct {
+	inner error
+}
+
+func (r *RetryStandbyErr) Error() string {
+	return r.inner.Error()
+}
+
+// RetryStandby use standby node to retry.
+func RetryStandby(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &RetryStandbyErr{
+		inner: err,
+	}
 }
