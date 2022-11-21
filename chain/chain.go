@@ -18,6 +18,9 @@ var (
 
 	// ErrSlowBlockHandling slow block handling
 	ErrSlowBlockHandling = errors.New("slow block handling")
+
+	// ErrForkedZeroBlockNumber block forked but block number is 0.
+	ErrForkedZeroBlockNumber = errors.New("block forked but number is 0")
 )
 
 // TxType transaction type.
@@ -520,7 +523,9 @@ func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, in
 	err = b.WithRetry(func(client Clienter) error {
 		for b.isForkedBlock(curHeight, block) {
 			curHeight = curHeight - 1
-
+			if block.Number <= 0 {
+				return handler.WrapsError(client, ErrForkedZeroBlockNumber)
+			}
 			if err := handler.OnForkedBlock(client, block); err != nil {
 				return handler.WrapsError(client, err)
 			}
