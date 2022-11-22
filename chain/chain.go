@@ -21,6 +21,9 @@ var (
 
 	// ErrForkedZeroBlockNumber block forked but block number is 0.
 	ErrForkedZeroBlockNumber = errors.New("block forked but number is 0")
+
+	// ErrUnexpectedBlockNumber got unexpected block number.
+	ErrUnexpectedBlockNumber = errors.New("got unexpected block number")
 )
 
 // TxType transaction type.
@@ -447,7 +450,7 @@ func (b *BlockSpider) getBlocks(opt *getBlocksOpt, handler BlockHandler) ([]*Blo
 	}
 	if handler.BlockMayFork() {
 		var newHeight uint64
-		block, newHeight, err = b.handleBlockMayFork(opt.localHeight, handler, block)
+		block, newHeight, err = b.handleBlockMayFork(opt, handler, block)
 		if err != nil {
 			errs[opt.localHeight] = err
 			return nil, errs
@@ -506,6 +509,9 @@ func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Bloc
 		return handler.WrapsError(client, err)
 	})
 	if block != nil {
+		if block.Number != height {
+			return nil, ErrUnexpectedBlockNumber
+		}
 		block.Metrics = append(block.Metrics, &Metric{
 			Stage:    "retrieveBlock",
 			NodeURLs: nodeURLs,
@@ -516,9 +522,9 @@ func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Bloc
 	return
 }
 
-func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, inBlock *Block) (block *Block, curHeight uint64, err error) {
+func (b *BlockSpider) handleBlockMayFork(opt *getBlocksOpt, handler BlockHandler, inBlock *Block) (block *Block, curHeight uint64, err error) {
 	block = inBlock
-	curHeight = height
+	curHeight = opt.localHeight
 
 	err = b.WithRetry(func(client Clienter) error {
 		for b.isForkedBlock(curHeight, block) {
@@ -526,6 +532,14 @@ func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, in
 			if block.Number <= 0 {
 				return handler.WrapsError(client, ErrForkedZeroBlockNumber)
 			}
+			if opt.chainHeight-block.Number > uint64(opt.concurrentDeltaThr) {
+				return handler.WrapsError(client, &ForkDeltaOverflow{
+					ChainHeight: opt.chainHeight,
+					BlockNumber: block.Number,
+					SafelyDelta: uint64(opt.concurrentDeltaThr),
+				})
+			}
+
 			if err := handler.OnForkedBlock(client, block); err != nil {
 				return handler.WrapsError(client, err)
 			}
@@ -533,6 +547,9 @@ func (b *BlockSpider) handleBlockMayFork(height uint64, handler BlockHandler, in
 			if blk, err := client.GetBlock(curHeight); err != nil {
 				return handler.WrapsError(client, err)
 			} else {
+				if blk.Number != curHeight {
+					return handler.WrapsError(client, ErrUnexpectedBlockNumber)
+				}
 				// 如果直接使用 block, err = client.GetBlock(curHeight) 这种方式，
 				// 且错误是可以重试的则会 block 变量设置为 nil，从而导致：
 				// runtime error: invalid memory address or nil pointer dereference
@@ -713,4 +730,16 @@ func RetryStandby(err error) error {
 	return &RetryStandbyErr{
 		inner: err,
 	}
+}
+
+// ForkDeltaOverflow delta between current chain height and
+// forked block number is greater than safety.
+type ForkDeltaOverflow struct {
+	ChainHeight uint64
+	BlockNumber uint64
+	SafelyDelta uint64
+}
+
+func (*ForkDeltaOverflow) Error() string {
+	return "delta between chain height and forked block number is greater than safety"
 }
