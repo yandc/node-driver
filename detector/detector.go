@@ -85,6 +85,14 @@ type Detector interface {
 
 	// DetectLastActiveBetween detect nodes that actived between a period.
 	DetectLastActiveBetween(begin, end time.Duration)
+
+	// SetPreferedNode set nodes that we are prefered to use.
+	// NOTE: nodes will be added if they didn't add before.
+	SetPreferedNode(node Node) bool
+
+	// GetDetectingElapsed get how much time cost to do detecting of node.
+	// NOTE: node have been added before.
+	GetDetectingElapsed(node Node) (elapsed time.Duration, ok bool)
 }
 
 // WatchIn is a embeded struct to watch nodes changed by detector.
@@ -474,4 +482,34 @@ func (h *simple) copyNodeWrappers() []*nodeWrapper {
 		nodes = append(nodes, n)
 	}
 	return nodes
+}
+
+// SetPreferedNode set nodes that we are prefered to use.
+// NOTE: nodes will be added if they didn't add before.
+func (h *simple) SetPreferedNode(node Node) bool {
+	nodes := h.copyNodeWrappers()
+	for idx, n := range nodes {
+		if n.node.URL() == node.URL() {
+			startIdx := atomic.LoadInt32(&h.startIdx)
+			if startIdx == int32(idx) {
+				return true
+			}
+			return atomic.CompareAndSwapInt32(&h.startIdx, startIdx, int32(idx))
+		}
+	}
+	h.Add(node)
+	startIdx := atomic.LoadInt32(&h.startIdx)
+	return atomic.CompareAndSwapInt32(&h.startIdx, startIdx, int32(h.Len()-1))
+}
+
+// GetDetectingElapsed get how much time cost to do detecting of node.
+// NOTE: node have been added before.
+func (h *simple) GetDetectingElapsed(node Node) (elapsed time.Duration, ok bool) {
+	nodes := h.copyNodeWrappers()
+	for _, n := range nodes {
+		if n.node.URL() == node.URL() {
+			return n.DetectElapsed(), true
+		}
+	}
+	return 0, false
 }
