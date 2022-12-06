@@ -533,15 +533,17 @@ func (b *BlockSpider) handleBlockMayFork(opt *getBlocksOpt, handler BlockHandler
 				return handler.WrapsError(client, ErrForkedZeroBlockNumber)
 			}
 			if opt.chainHeight-block.Number > uint64(opt.concurrentDeltaThr) {
-				return handler.WrapsError(client, &ForkDeltaOverflow{
+				// 这里只调用 WrapsError 触发报警，不阻塞流程。
+				handler.WrapsError(client, &ForkDeltaOverflow{
 					ChainHeight: opt.chainHeight,
 					BlockNumber: block.Number,
 					SafelyDelta: uint64(opt.concurrentDeltaThr),
 				})
-			}
-
-			if err := handler.OnForkedBlock(client, block); err != nil {
-				return handler.WrapsError(client, err)
+			} else {
+				// 安全块高内调用 OnForkedBlock，否则只回退块高不进行 OnForkedBlock 调用。
+				if err := handler.OnForkedBlock(client, block); err != nil {
+					return handler.WrapsError(client, err)
+				}
 			}
 			// TODO: Store height.
 			if blk, err := client.GetBlock(curHeight); err != nil {
