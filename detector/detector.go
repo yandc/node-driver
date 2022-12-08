@@ -92,7 +92,7 @@ type Detector interface {
 
 	// GetDetectingElapsed get how much time cost to do detecting of node.
 	// NOTE: node have been added before.
-	GetDetectingElapsed(node Node) (elapsed time.Duration, ok bool)
+	GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.Duration, err error)
 }
 
 // WatchIn is a embeded struct to watch nodes changed by detector.
@@ -144,6 +144,16 @@ type nodeWrapper struct {
 	// set this when node failed but its RetryAfter hasn't changed accorrdingly.
 	defaultRetryAfter    *time.Time
 	numOfContinualFailed uint32
+}
+
+func (w *nodeWrapper) doDetect() error {
+	start := time.Now()
+	if err := w.node.Detect(); err != nil {
+		w.SetDetectElapsed(time.Hour) // max
+		return err
+	}
+	w.SetDetectElapsed(time.Now().Sub(start))
+	return nil
 }
 
 func (w *nodeWrapper) DetectedAt() time.Time {
@@ -440,12 +450,7 @@ func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nod
 		go func(idx int) {
 			defer wg.Done()
 			nw := h.nodes[idx]
-			start := time.Now()
-			if err := nw.node.Detect(); err != nil {
-				nw.SetDetectElapsed(time.Hour) // max
-				return
-			}
-			nw.SetDetectElapsed(time.Now().Sub(start))
+			_ = nw.doDetect()
 		}(idx)
 	}
 	wg.Wait()
@@ -504,12 +509,20 @@ func (h *simple) SetPreferedNode(node Node) bool {
 
 // GetDetectingElapsed get how much time cost to do detecting of node.
 // NOTE: node have been added before.
-func (h *simple) GetDetectingElapsed(node Node) (elapsed time.Duration, ok bool) {
+func (h *simple) GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.Duration, err error) {
 	nodes := h.copyNodeWrappers()
 	for _, n := range nodes {
 		if n.node.URL() == node.URL() {
-			return n.DetectElapsed(), true
+			if len(refresh) > 0 && refresh[0] {
+				err = n.doDetect()
+			}
+
+			elapsed := n.DetectElapsed()
+			if elapsed == time.Hour {
+				return 0, errors.New("detect failed")
+			}
+			return n.DetectElapsed(), err
 		}
 	}
-	return 0, false
+	return 0, errors.New("not found")
 }
