@@ -91,6 +91,9 @@ type Block struct {
 
 	Transactions []*Transaction
 	Metrics      []*Metric
+
+	// ExtraTxs may come from contract logs that will be added in OnNewTx invocation..
+	ExtraTxs []*Transaction
 }
 
 // Transaction transaction.
@@ -103,8 +106,26 @@ type Transaction struct {
 	ToAddress   string
 	Value       string
 
+	Result *TxResult
+
 	Raw    interface{}
 	Record interface{}
+}
+
+// TxResult the result of tx.
+type TxResult struct {
+	MatchedFrom   bool // Matched the from uid from our system.
+	MatchedTo     bool // Matched the to uid from our system.
+	FailedOnChain bool // Tx has been processed successfully by chain.
+}
+
+// SetResult
+func (tx *Transaction) SetResult(matchedFrom, matchedTo, failedOnChain bool) {
+	tx.Result = &TxResult{
+		MatchedFrom:   matchedFrom,
+		MatchedTo:     matchedTo,
+		FailedOnChain: failedOnChain,
+	}
 }
 
 // Metric metric
@@ -175,11 +196,24 @@ type DetectorWatcher interface {
 	OnNodeSuccess(node detector.Node)
 }
 
+type Watcher interface {
+	DetectorWatcher
+
+	// OnSentTxFailed will be invoked when txs have failed and sent by us.
+	//
+	// - totalInTenMins: number of total failed txs in 10 minutes.
+	// - numOfContinuous: number of continuous failed txs.
+	OnSentTxFailed(txType TxType, numOfContinuous int, txHashs []string)
+}
+
 // BlockSpider block spider to crawl blocks from chain.
 type BlockSpider struct {
 	detector detector.Detector
 	standby  detector.Detector
 	store    StateStore
+	watchers []Watcher
+
+	accumulator sentTxFailedAccumulator
 }
 
 type blockTxHandler struct {
@@ -251,6 +285,15 @@ func (b *BlockSpider) AddStandby(clients ...Clienter) {
 
 func (b *BlockSpider) Start(handler BlockHandler, concurrentDeltaThr int, maxConcurrency int) {
 	go b.StartIndexBlock(handler, concurrentDeltaThr, maxConcurrency)
+}
+
+func (b *BlockSpider) Watch(watchers ...Watcher) {
+	b.watchers = watchers
+	dWatchers := make([]DetectorWatcher, 0, len(watchers))
+	for _, w := range watchers {
+		dWatchers = append(dWatchers, w)
+	}
+	b.WatchDetector(dWatchers...)
 }
 
 func (b *BlockSpider) WatchDetector(watchers ...DetectorWatcher) {
@@ -373,7 +416,6 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 	}
 
 	wg.Wait()
-
 	if !b.handleErrs(handler, errs, opt) {
 		return 0, false
 	}
@@ -417,6 +459,12 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 	if !b.handleErrs(handler, errs, opt) {
 		return 0, false
 	}
+
+	for _, blk := range blocks {
+		b.accumulator.accumulateBlock(blk)
+	}
+
+	b.monitorContinuousSentTxFailure()
 	return indexedBlockNum, true
 }
 
@@ -660,7 +708,10 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 			handler.OnError(err)
 			continue
 		}
+
+		b.accumulator.accumulateTx(tx)
 	}
+	b.monitorContinuousSentTxFailure()
 	return nil
 }
 
@@ -675,7 +726,6 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 	if err != nil {
 		return err
 	}
-
 	if txByHash == nil {
 		err = b.WithRetry(func(client Clienter) error {
 			err := txHandler.OnDroppedTx(client, tx)
@@ -713,6 +763,19 @@ func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
 		}
 	}
 	return err
+}
+
+// monitorContinuousSentTxFailure check if have continuous tx failed
+// that sent by us.
+func (b *BlockSpider) monitorContinuousSentTxFailure() {
+	for txType, store := range b.accumulator.getResults() {
+		txHashs := store.getResult()
+		if len(txHashs) > 0 {
+			for _, w := range b.watchers {
+				w.OnSentTxFailed(txType, len(txHashs), txHashs)
+			}
+		}
+	}
 }
 
 // RetryStandbyErr wraps error to retry on standby nodes.
