@@ -139,7 +139,7 @@ type simple struct {
 type nodeWrapper struct {
 	node            Node
 	detectElapsedMS int64
-	detectedAt      int64
+	workedAt        int64
 
 	// set this when node failed but its RetryAfter hasn't changed accorrdingly.
 	defaultRetryAfter    *time.Time
@@ -156,12 +156,12 @@ func (w *nodeWrapper) doDetect() error {
 	return nil
 }
 
-func (w *nodeWrapper) DetectedAt() time.Time {
-	return time.Unix(atomic.LoadInt64(&w.detectedAt), 0)
+func (w *nodeWrapper) WorkedAt() time.Time {
+	return time.Unix(atomic.LoadInt64(&w.workedAt), 0)
 }
 
-func (w *nodeWrapper) UpdateDetectedAt() {
-	atomic.StoreInt64(&w.detectedAt, time.Now().Unix())
+func (w *nodeWrapper) UpdateWorkedAt() {
+	atomic.StoreInt64(&w.workedAt, time.Now().Unix())
 	atomic.StoreUint32(&w.numOfContinualFailed, 0)
 }
 
@@ -171,7 +171,6 @@ func (w *nodeWrapper) DetectElapsed() time.Duration {
 
 func (w *nodeWrapper) SetDetectElapsed(elapsed time.Duration) {
 	atomic.StoreInt64(&w.detectElapsedMS, int64(elapsed/time.Millisecond))
-	w.UpdateDetectedAt()
 }
 
 func (w *nodeWrapper) retryAfter() time.Time {
@@ -346,7 +345,7 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 		// Invoke without error and we shall done the progress.
 		if ret = h.do(node.node, fn); ret == nil {
 			// set detected to avoid detect in plan.
-			node.UpdateDetectedAt()
+			node.UpdateWorkedAt()
 
 			// Node have been used successfully.
 			for _, f := range h.onSuccess {
@@ -438,10 +437,10 @@ func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nod
 	wg := &sync.WaitGroup{}
 
 	for idx, n := range nodes {
-		detectedAt := n.DetectedAt()
-		if !detectedAt.IsZero() {
-			sinceLastActive := time.Now().Sub(detectedAt)
-			if !(sinceLastActive >= begin && sinceLastActive <= end) {
+		workedAt := n.WorkedAt()
+		if !workedAt.IsZero() {
+			sinceWorkedAt := time.Now().Sub(workedAt)
+			if !(sinceWorkedAt >= begin && sinceWorkedAt <= end) {
 				continue
 			}
 		}
@@ -499,6 +498,7 @@ func (h *simple) SetPreferedNode(node Node) bool {
 			if startIdx == int32(idx) {
 				return true
 			}
+			n.UpdateWorkedAt()
 			return atomic.CompareAndSwapInt32(&h.startIdx, startIdx, int32(idx))
 		}
 	}
