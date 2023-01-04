@@ -117,14 +117,16 @@ type TxResult struct {
 	MatchedFrom   bool // Matched the from uid from our system.
 	MatchedTo     bool // Matched the to uid from our system.
 	FailedOnChain bool // Tx has been processed successfully by chain.
+	FromUID       string
 }
 
 // SetResult
-func (tx *Transaction) SetResult(matchedFrom, matchedTo, failedOnChain bool) {
+func (tx *Transaction) SetResult(matchedFrom, matchedTo, failedOnChain bool, fromUID string) {
 	tx.Result = &TxResult{
 		MatchedFrom:   matchedFrom,
 		MatchedTo:     matchedTo,
 		FailedOnChain: failedOnChain,
+		FromUID:       fromUID,
 	}
 }
 
@@ -203,7 +205,7 @@ type Watcher interface {
 	//
 	// - totalInTenMins: number of total failed txs in 10 minutes.
 	// - numOfContinuous: number of continuous failed txs.
-	OnSentTxFailed(txType TxType, numOfContinuous int, txHashs []string)
+	OnSentTxFailed(txType TxType, numOfContinuous int, txs []*Transaction)
 }
 
 // BlockSpider block spider to crawl blocks from chain.
@@ -769,10 +771,10 @@ func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
 // that sent by us.
 func (b *BlockSpider) monitorContinuousSentTxFailure() {
 	for txType, store := range b.accumulator.getResults() {
-		txHashs := store.getResult()
-		if len(txHashs) > 0 {
+		txs := store.getResult()
+		if len(txs) > 0 {
 			for _, w := range b.watchers {
-				w.OnSentTxFailed(txType, len(txHashs), txHashs)
+				w.OnSentTxFailed(txType, len(txs), txs)
 			}
 		}
 	}

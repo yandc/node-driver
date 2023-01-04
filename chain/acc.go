@@ -35,8 +35,8 @@ func (a *sentTxFailedAccumulator) getResults() map[TxType]*sentTxFailedStore {
 
 // sentTxFailedAccumulator accumulate for alarming(thread safe).
 type sentTxFailedStore struct {
-	lock                    sync.RWMutex
-	continuousFailedTxHashs []string
+	lock                sync.RWMutex
+	continuousFailedTxs []*Transaction
 }
 
 func (a *sentTxFailedStore) onTx(tx *Transaction) {
@@ -49,21 +49,21 @@ func (a *sentTxFailedStore) onTx(tx *Transaction) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 	if tx.Result.FailedOnChain {
-		a.continuousFailedTxHashs = append(a.continuousFailedTxHashs, tx.Hash)
+		a.continuousFailedTxs = append(a.continuousFailedTxs, tx)
 	} else {
-		a.continuousFailedTxHashs = nil
+		a.continuousFailedTxs = nil
 	}
 }
 
-func (a *sentTxFailedStore) getResult() []string {
-	if len(a.continuousFailedTxHashs) == 0 {
+func (a *sentTxFailedStore) getResult() []*Transaction {
+	if len(a.continuousFailedTxs) == 0 {
 		return nil
 	}
 
 	a.lock.RLock()
 	a.lock.RUnlock()
-	results := make([]string, 0, len(a.continuousFailedTxHashs))
-	for _, h := range a.continuousFailedTxHashs {
+	results := make([]*Transaction, 0, len(a.continuousFailedTxs))
+	for _, h := range a.continuousFailedTxs {
 		results = append(results, h)
 	}
 	return results
