@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -216,6 +217,9 @@ type BlockSpider struct {
 	watchers []Watcher
 
 	accumulator sentTxFailedAccumulator
+
+	prefetchedBlocks map[uint64]*Block
+	prefetchedTxs    map[string]*Transaction
 }
 
 type blockTxHandler struct {
@@ -273,6 +277,22 @@ func NewBlockSpider(store StateStore, clients ...Clienter) *BlockSpider {
 	}
 }
 
+func (b *BlockSpider) SetStateStore(store StateStore) {
+	b.store = store
+}
+
+func (b *BlockSpider) SetPrefetched(blocks []*Block, txs []*Transaction) {
+	b.prefetchedBlocks = make(map[uint64]*Block)
+	b.prefetchedTxs = make(map[string]*Transaction)
+
+	for _, blk := range blocks {
+		b.prefetchedBlocks[blk.Number] = blk
+	}
+	for _, tx := range txs {
+		b.prefetchedTxs[tx.Hash] = tx
+	}
+}
+
 func (b *BlockSpider) EnableRoundRobin() {
 	b.detector.EnableRoundRobin()
 }
@@ -311,6 +331,14 @@ func (b *BlockSpider) WatchDetector(watchers ...DetectorWatcher) {
 // - concurrentDeltaThr indicates how many blocks delta from chain is safe to get blocks concurrently.
 // - maxConcurrency indicates the max goroutines to get blocks concurrently.
 func (b *BlockSpider) StartIndexBlock(handler BlockHandler, concurrentDeltaThr int, maxConcurrency int) {
+	b.StartIndexBlockWithContext(context.Background(), handler, concurrentDeltaThr, maxConcurrency)
+}
+
+// StartIndexBlock starts a loop to index blocks: extract transactions from block.
+//
+// - concurrentDeltaThr indicates how many blocks delta from chain is safe to get blocks concurrently.
+// - maxConcurrency indicates the max goroutines to get blocks concurrently.
+func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler BlockHandler, concurrentDeltaThr int, maxConcurrency int) {
 	b.detector.DetectAll()
 	go b.detector.StartDetectPlan(3*time.Minute, 0, 3*time.Minute)
 	go b.detector.StartDetectPlan(10*time.Minute, 3*time.Minute, 10*time.Minute)
@@ -359,6 +387,17 @@ func (b *BlockSpider) StartIndexBlock(handler BlockHandler, concurrentDeltaThr i
 				goto _START
 			}
 			curHeight += uint64(indexedBlockNum)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 	}
 }
@@ -555,6 +594,10 @@ func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Bloc
 	nodeURLs := make([]string, 0, b.detector.Len())
 	err = b.WithRetry(func(client Clienter) error {
 		nodeURLs = append(nodeURLs, client.URL())
+		if blk, ok := b.prefetchedBlocks[height]; ok {
+			block = blk
+			return nil
+		}
 		block, err = client.GetBlock(height)
 		return handler.WrapsError(client, err)
 	})
@@ -720,6 +763,11 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler, tx *Transaction) error {
 	var txByHash *Transaction
 	err := b.WithRetry(func(client Clienter) error {
+		if p, ok := b.prefetchedTxs[tx.Hash]; ok {
+			txByHash = p
+			return nil
+		}
+
 		var err error
 		txByHash, err = client.GetTxByHash(tx.Hash)
 		return handler.WrapsError(client, err)
