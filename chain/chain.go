@@ -345,7 +345,6 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 	go b.detector.StartDetectPlan(20*time.Minute, 10*time.Minute, math.MaxInt64)
 
 	for {
-	_START:
 		height, curHeight, err := b.getHeights(handler)
 		if err != nil {
 			handler.OnError(err)
@@ -376,7 +375,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 			indexedBlockNum, storeHeight := b.doIndexBlocks(handler, height, &opt)
 
 			if !storeHeight {
-				goto _START
+				goto _END_INNER_LOOP
 			}
 
 			if err := b.store.StoreHeight(opt.localHeight + uint64(indexedBlockNum)); err != nil {
@@ -384,7 +383,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 					ChainHeight: opt.chainHeight,
 					CurHeight:   opt.localHeight,
 				})
-				goto _START
+				goto _END_INNER_LOOP
 			}
 			curHeight += uint64(indexedBlockNum)
 			select {
@@ -393,7 +392,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 			default:
 			}
 		}
-
+	_END_INNER_LOOP:
 		select {
 		case <-ctx.Done():
 			return
