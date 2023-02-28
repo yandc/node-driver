@@ -677,7 +677,7 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 
 	for _, tx := range block.Transactions {
 		err = b.WithRetry(func(client Clienter) error {
-			return txHandler.OnNewTx(client, block, tx)
+			return handler.WrapsError(client, txHandler.OnNewTx(client, block, tx))
 		})
 		if err != nil {
 			return nil, err
