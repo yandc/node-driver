@@ -666,6 +666,10 @@ func (b *BlockSpider) isForkedBlock(height uint64, block *Block) bool {
 }
 
 func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHandler) (txHandler TxHandler, err error) {
+	if err := b.composeTxsInBlock(block, handler); err != nil {
+		return nil, err
+	}
+
 	err = b.WithRetry(func(client Clienter) (err error) {
 		txHandler, err = handler.OnNewBlock(client, chainHeight, block)
 		return handler.WrapsError(client, err)
@@ -684,6 +688,27 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		}
 	}
 	return
+}
+
+// composeTxsInBlock use `GetTxByHash` to fill txs in block,
+// if the Raw pointer of tx is nil.
+func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler) error {
+	for i, tx := range block.Transactions {
+		if tx.Raw == nil && tx.Hash != "" {
+			err := b.WithRetry(func(client Clienter) (err error) {
+				newTx, err := client.GetTxByHash(tx.Hash)
+				if err != nil {
+					return handler.WrapsError(client, err)
+				}
+				block.Transactions[i] = newTx
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
