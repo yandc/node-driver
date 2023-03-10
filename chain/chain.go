@@ -698,6 +698,11 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 			go func() {
 				defer wg.Done()
 				for tx := range jobsChan {
+					if tx == nil {
+						// stop
+						break
+					}
+
 					innerErr := b.WithRetry(func(client Clienter) error {
 						return handler.WrapsError(client, txHandler.OnNewTx(client, block, tx))
 					})
@@ -713,8 +718,9 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		for _, tx := range block.Transactions {
 			jobsChan <- tx
 		}
-		close(jobsChan) // close inner tx
+		jobsChan <- nil // stop
 		wg.Wait()
+		close(jobsChan) // close inner tx
 		return
 	}
 
@@ -742,6 +748,11 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 		go func() {
 			defer wg.Done()
 			for idx := range jobsChan {
+				if idx == -1 {
+					// stop
+					break
+				}
+
 				lock.RLock()
 				txHash := block.Transactions[idx].Hash
 				lock.RUnlock()
@@ -772,10 +783,11 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 			jobsChan <- i
 		}
 	}
+	jobsChan <- -1 // stop
 	lock.RUnlock()
 
-	close(jobsChan) // exit inner loop
 	wg.Wait()
+	close(jobsChan) // close
 	return
 }
 
