@@ -216,6 +216,8 @@ type BlockSpider struct {
 	store    StateStore
 	watchers []Watcher
 
+	concurrencyTxs bool
+
 	accumulator sentTxFailedAccumulator
 
 	prefetchedBlocks map[uint64]*Block
@@ -295,6 +297,10 @@ func (b *BlockSpider) SetPrefetched(blocks []*Block, txs []*Transaction) {
 
 func (b *BlockSpider) EnableRoundRobin() {
 	b.detector.EnableRoundRobin()
+}
+
+func (b *BlockSpider) EnableHandlingTxsConcurrency() {
+	b.concurrencyTxs = true
 }
 
 func (b *BlockSpider) AddStandby(clients ...Clienter) {
@@ -679,6 +685,39 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		return nil, err
 	}
 
+	concurrency := 1
+	if b.concurrencyTxs {
+		concurrency = opt.concurrency()
+	}
+	if concurrency > 1 {
+		jobsChan := make(chan *Transaction, len(block.Transactions))
+		wg := &sync.WaitGroup{}
+		lock := sync.Mutex{}
+		for i := 0; i < concurrency; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for tx := range jobsChan {
+					innerErr := b.WithRetry(func(client Clienter) error {
+						return handler.WrapsError(client, txHandler.OnNewTx(client, block, tx))
+					})
+					if innerErr != nil {
+						lock.Lock()
+						err = innerErr
+						lock.Unlock()
+					}
+				}
+			}()
+		}
+
+		for _, tx := range block.Transactions {
+			jobsChan <- tx
+		}
+		close(jobsChan) // close inner tx
+		wg.Wait()
+		return
+	}
+
 	for _, tx := range block.Transactions {
 		err = b.WithRetry(func(client Clienter) error {
 			return handler.WrapsError(client, txHandler.OnNewTx(client, block, tx))
@@ -746,7 +785,7 @@ func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
 	}
 	begin := block.Metrics[0].Begin
 	end := block.Metrics[len(block.Metrics)-1].End
-	thr := 5 * time.Second
+	thr := 3 * time.Second
 	if end.Sub(begin) < thr {
 		return
 	}
