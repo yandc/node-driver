@@ -433,7 +433,7 @@ func (b *BlockSpider) doIndexBlocks(handler BlockHandler, chainHeight uint64, op
 		go func(block *Block) {
 			defer wg.Done()
 			start := time.Now()
-			txHandler, err := b.handleTx(block, chainHeight, handler)
+			txHandler, err := b.handleTx(block, chainHeight, handler, opt)
 			block.Metrics = append(block.Metrics, &Metric{
 				Stage: "handleTx",
 				Begin: start,
@@ -665,8 +665,8 @@ func (b *BlockSpider) isForkedBlock(height uint64, block *Block) bool {
 	return curPreBlockHash != "" && curPreBlockHash != preHash
 }
 
-func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHandler) (txHandler TxHandler, err error) {
-	if err := b.composeTxsInBlock(block, handler); err != nil {
+func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHandler, opt *getBlocksOpt) (txHandler TxHandler, err error) {
+	if err := b.composeTxsInBlock(block, handler, opt); err != nil {
 		return nil, err
 	}
 
@@ -692,23 +692,52 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 
 // composeTxsInBlock use `GetTxByHash` to fill txs in block,
 // if the Raw pointer of tx is nil.
-func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler) error {
+func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt *getBlocksOpt) (err error) {
+	jobsChan := make(chan int, len(block.Transactions))
+	wg := &sync.WaitGroup{}
+	lock := &sync.RWMutex{}
+
+	// start workers.
+	for i := 0; i < opt.concurrency(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobsChan {
+				lock.RLock()
+				txHash := block.Transactions[idx].Hash
+				lock.RUnlock()
+
+				innerErr := b.WithRetry(func(client Clienter) error {
+					newTx, err := client.GetTxByHash(txHash)
+					if err != nil {
+						return handler.WrapsError(client, err)
+					}
+					lock.Lock()
+					block.Transactions[idx] = newTx
+					lock.Unlock()
+					return nil
+				})
+
+				if innerErr != nil {
+					lock.Lock()
+					err = innerErr
+					lock.Unlock()
+				}
+			}
+		}()
+	}
+
+	lock.RLock()
 	for i, tx := range block.Transactions {
 		if tx.Raw == nil && tx.Hash != "" {
-			err := b.WithRetry(func(client Clienter) (err error) {
-				newTx, err := client.GetTxByHash(tx.Hash)
-				if err != nil {
-					return handler.WrapsError(client, err)
-				}
-				block.Transactions[i] = newTx
-				return nil
-			})
-			if err != nil {
-				return err
-			}
+			jobsChan <- i
 		}
 	}
-	return nil
+	lock.RUnlock()
+
+	close(jobsChan) // exit inner loop
+	wg.Wait()
+	return
 }
 
 func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
