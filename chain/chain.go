@@ -216,7 +216,7 @@ type BlockSpider struct {
 	store    StateStore
 	watchers []Watcher
 
-	concurrencyTxs bool
+	concurrencyTxs int
 
 	accumulator sentTxFailedAccumulator
 
@@ -299,8 +299,12 @@ func (b *BlockSpider) EnableRoundRobin() {
 	b.detector.EnableRoundRobin()
 }
 
-func (b *BlockSpider) EnableHandlingTxsConcurrency() {
-	b.concurrencyTxs = true
+func (b *BlockSpider) SetHandlingTxsConcurrency(v int) {
+	if v < 1 {
+		v = 1
+	}
+
+	b.concurrencyTxs = v
 }
 
 func (b *BlockSpider) AddStandby(clients ...Clienter) {
@@ -685,12 +689,12 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		return nil, err
 	}
 
-	concurrency := 1
-	if b.concurrencyTxs {
-		concurrency = opt.concurrency()
+	concurrency := b.concurrencyTxs
+	if concurrency > len(block.Transactions) {
+		concurrency = len(block.Transactions)
 	}
 	if concurrency > 1 {
-		jobsChan := make(chan *Transaction, len(block.Transactions))
+		jobsChan := make(chan *Transaction, len(block.Transactions)+1)
 		wg := &sync.WaitGroup{}
 		lock := sync.Mutex{}
 		for i := 0; i < concurrency; i++ {
@@ -738,7 +742,17 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 // composeTxsInBlock use `GetTxByHash` to fill txs in block,
 // if the Raw pointer of tx is nil.
 func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt *getBlocksOpt) (err error) {
-	jobsChan := make(chan int, len(block.Transactions))
+	neededIndices := make([]int, 0, len(block.Transactions))
+	for i, tx := range block.Transactions {
+		if tx.Raw == nil && tx.Hash != "" {
+			neededIndices = append(neededIndices, i)
+		}
+	}
+	if len(neededIndices) == 0 {
+		return nil
+	}
+
+	jobsChan := make(chan int, len(block.Transactions)+1)
 	wg := &sync.WaitGroup{}
 	lock := &sync.RWMutex{}
 
@@ -777,14 +791,10 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 		}()
 	}
 
-	lock.RLock()
-	for i, tx := range block.Transactions {
-		if tx.Raw == nil && tx.Hash != "" {
-			jobsChan <- i
-		}
+	for _, i := range neededIndices {
+		jobsChan <- i
 	}
 	jobsChan <- -1 // stop
-	lock.RUnlock()
 
 	wg.Wait()
 	close(jobsChan) // close
