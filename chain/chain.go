@@ -758,8 +758,11 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 	}
 
 	concurrency := opt.concurrency()
+	if concurrency > len(neededIndices) {
+		concurrency = len(neededIndices)
+	}
 
-	jobsChan := make(chan int, len(block.Transactions)+concurrency)
+	jobsChan := make(chan int, len(neededIndices)+concurrency)
 	wg := &sync.WaitGroup{}
 	lock := &sync.RWMutex{}
 
