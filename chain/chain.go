@@ -259,6 +259,9 @@ func (opt getBlocksOpt) concurrency() int {
 	if concurrency > opt.maxConcurrency {
 		concurrency = opt.maxConcurrency
 	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	return concurrency
 }
 
@@ -694,7 +697,7 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		concurrency = len(block.Transactions)
 	}
 	if concurrency > 1 {
-		jobsChan := make(chan *Transaction, len(block.Transactions)+1)
+		jobsChan := make(chan *Transaction, len(block.Transactions)+concurrency)
 		wg := &sync.WaitGroup{}
 		lock := sync.Mutex{}
 		for i := 0; i < concurrency; i++ {
@@ -722,7 +725,9 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		for _, tx := range block.Transactions {
 			jobsChan <- tx
 		}
-		jobsChan <- nil // stop
+		for i := 0; i < concurrency; i++ {
+			jobsChan <- nil // stop
+		}
 		wg.Wait()
 		close(jobsChan) // close inner tx
 		return
@@ -752,12 +757,14 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 		return nil
 	}
 
-	jobsChan := make(chan int, len(block.Transactions)+1)
+	concurrency := opt.concurrency()
+
+	jobsChan := make(chan int, len(block.Transactions)+concurrency)
 	wg := &sync.WaitGroup{}
 	lock := &sync.RWMutex{}
 
 	// start workers.
-	for i := 0; i < opt.concurrency(); i++ {
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -794,7 +801,9 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 	for _, i := range neededIndices {
 		jobsChan <- i
 	}
-	jobsChan <- -1 // stop
+	for i := 0; i < concurrency; i++ {
+		jobsChan <- -1 // stop
+	}
 
 	wg.Wait()
 	close(jobsChan) // close
