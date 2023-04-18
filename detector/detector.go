@@ -238,13 +238,13 @@ func (h *simple) Failover() int {
 
 func (h *simple) Add(nodes ...Node) {
 	h.lock.Lock()
-	defer h.lock.Unlock()
 	for _, node := range nodes {
 		w := &nodeWrapper{
 			node: node,
 		}
 		h.nodes = append(h.nodes, w)
 	}
+	h.lock.Unlock()
 }
 
 func (h *simple) Each(each func(i int, n Node) bool) error {
@@ -388,6 +388,7 @@ func (h *simple) do(node Node, fn func(Node) error) (err error) {
 
 func (h *simple) Watch(watchers ...func([]Node)) {
 	h.watchers = append(h.watchers, watchers...)
+	h.notifyNodeChanged() // Initial nodes for watcher.
 }
 
 func (h *simple) WatchFailover(watchers ...func(Node, Node)) {

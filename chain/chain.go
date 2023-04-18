@@ -42,12 +42,6 @@ const (
 type Clienter interface {
 	detector.Node
 
-	// GetBalance fetch balance of major coin.
-	// GetBalance(addr string) (interface{}, error)
-
-	// GetTokensBalance fetch balance of tokens.
-	// GetTokensBalance(addr string, tokens []string) (map[string]interface{}, error)
-
 	// GetBlock fetch block data of the given height.
 	GetBlock(height uint64) (*Block, error)
 
@@ -168,6 +162,10 @@ type BlockHandler interface {
 
 	// WrapsError wraps error to control when to retry.
 	WrapsError(client Clienter, err error) error
+
+	// IsDroppedTx returns true if tx had been dropped on-chain.
+	// `txByHash` and `err` are returned by `client.GetTxByHash`
+	IsDroppedTx(txByHash *Transaction, err error) bool
 }
 
 // HeightInfo info of heights.
@@ -207,6 +205,14 @@ type Watcher interface {
 	// - totalInTenMins: number of total failed txs in 10 minutes.
 	// - numOfContinuous: number of continuous failed txs.
 	OnSentTxFailed(txType TxType, numOfContinuous int, txs []*Transaction)
+}
+
+// DefaultTxDroppedIn default implementation of `IsDroppedTx`
+type DefaultTxDroppedIn struct {
+}
+
+func (td *DefaultTxDroppedIn) IsDroppedTx(txByHash *Transaction, err error) bool {
+	return txByHash == nil && err == nil
 }
 
 // BlockSpider block spider to crawl blocks from chain.
@@ -723,7 +729,11 @@ func (b *BlockSpider) handleTx(block *Block, chainHeight uint64, handler BlockHa
 		}
 
 		for _, tx := range block.Transactions {
-			jobsChan <- tx
+			// NOTE: nil tx may dropped on-chain.
+			// See handler.IsDroppedTx invocation in composeTxsInBlock
+			if tx != nil {
+				jobsChan <- tx
+			}
 		}
 		for i := 0; i < concurrency; i++ {
 			jobsChan <- nil // stop
@@ -776,21 +786,26 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 					// stop
 					break
 				}
-
 				lock.RLock()
-				txHash := block.Transactions[idx].Hash
+				if err != nil {
+					return
+				}
 				lock.RUnlock()
+
+				txHash := block.Transactions[idx].Hash
 
 				innerErr := b.WithRetry(func(client Clienter) error {
 					newTx, err := client.GetTxByHash(txHash)
 					if err != nil {
 						return handler.WrapsError(client, err)
 					}
-					lock.Lock()
 					block.Transactions[idx] = newTx
-					lock.Unlock()
 					return nil
 				})
+
+				if handler.IsDroppedTx(block.Transactions[idx], innerErr) {
+					continue
+				}
 
 				if innerErr != nil {
 					lock.Lock()
@@ -899,10 +914,7 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 		return handler.WrapsError(client, err)
 	})
 
-	if err != nil {
-		return err
-	}
-	if txByHash == nil {
+	if handler.IsDroppedTx(txByHash, err) {
 		err = b.WithRetry(func(client Clienter) error {
 			err := txHandler.OnDroppedTx(client, tx)
 			return handler.WrapsError(client, err)
@@ -912,6 +924,10 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 			return err
 		}
 		return nil
+	}
+
+	if err != nil {
+		return err
 	}
 
 	txByHash.Record = tx.Record
