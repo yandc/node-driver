@@ -22,6 +22,18 @@ func (e *RetryErr) Error() string {
 	return e.inner.Error()
 }
 
+func UnwrapRetryErr(err error) error {
+	if err == nil {
+		return err
+	}
+
+	if rErr, ok := err.(*RetryErr); ok {
+		return rErr.inner
+	}
+
+	return err
+}
+
 // NeedRetry returns true if the err need retry on next node.
 func NeedRetry(err error) bool {
 	if err == nil {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"gitlab.bixin.com/mili/node-driver/common"
 	"gitlab.bixin.com/mili/node-driver/detector"
 )
 
@@ -366,7 +367,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 	for {
 		height, curHeight, err := b.getHeights(handler)
 		if err != nil {
-			handler.OnError(err)
+			handler.OnError(common.UnwrapRetryErr(err))
 			continue
 		}
 
@@ -398,7 +399,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 			}
 
 			if err := b.store.StoreHeight(opt.localHeight + uint64(indexedBlockNum)); err != nil {
-				handler.OnError(err, HeightInfo{
+				handler.OnError(common.UnwrapRetryErr(err), HeightInfo{
 					ChainHeight: opt.chainHeight,
 					CurHeight:   opt.localHeight,
 				})
@@ -423,7 +424,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 func (b *BlockSpider) handleErrs(handler BlockHandler, errs map[uint64]error, opt *getBlocksOpt) (storeHeight bool) {
 	storeHeight = true
 	for curHeight, err := range errs {
-		storeHeight = storeHeight && handler.OnError(err, HeightInfo{
+		storeHeight = storeHeight && handler.OnError(common.UnwrapRetryErr(err), HeightInfo{
 			ChainHeight: opt.chainHeight,
 			CurHeight:   curHeight,
 		})
@@ -859,7 +860,7 @@ func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
 // SealPendingTransactions load pending transactions and try to seal them.
 func (b *BlockSpider) SealPendingTransactions(handler BlockHandler) {
 	if err := b.doSealPendingTxs(handler); err != nil {
-		handler.OnError(err)
+		handler.OnError(common.UnwrapRetryErr(err))
 	}
 }
 
@@ -878,11 +879,11 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 		})
 
 		if err != nil {
-			handler.OnError(err)
+			handler.OnError(common.UnwrapRetryErr(err))
 			continue
 		}
 		if err := b.sealOnePendingTx(handler, txHandler, tx); err != nil {
-			handler.OnError(err)
+			handler.OnError(common.UnwrapRetryErr(err))
 			continue
 		}
 
@@ -891,7 +892,7 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 			return handler.WrapsError(client, err)
 		})
 		if err != nil {
-			handler.OnError(err)
+			handler.OnError(common.UnwrapRetryErr(err))
 			continue
 		}
 
