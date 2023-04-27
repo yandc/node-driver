@@ -367,7 +367,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 	for {
 		height, curHeight, err := b.getHeights(handler)
 		if err != nil {
-			handler.OnError(common.UnwrapRetryErr(err))
+			handler.OnError(err)
 			continue
 		}
 
@@ -399,7 +399,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 			}
 
 			if err := b.store.StoreHeight(opt.localHeight + uint64(indexedBlockNum)); err != nil {
-				handler.OnError(common.UnwrapRetryErr(err), HeightInfo{
+				handler.OnError(err, HeightInfo{
 					ChainHeight: opt.chainHeight,
 					CurHeight:   opt.localHeight,
 				})
@@ -424,7 +424,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 func (b *BlockSpider) handleErrs(handler BlockHandler, errs map[uint64]error, opt *getBlocksOpt) (storeHeight bool) {
 	storeHeight = true
 	for curHeight, err := range errs {
-		storeHeight = storeHeight && handler.OnError(common.UnwrapRetryErr(err), HeightInfo{
+		storeHeight = storeHeight && handler.OnError(err, HeightInfo{
 			ChainHeight: opt.chainHeight,
 			CurHeight:   curHeight,
 		})
@@ -860,7 +860,7 @@ func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
 // SealPendingTransactions load pending transactions and try to seal them.
 func (b *BlockSpider) SealPendingTransactions(handler BlockHandler) {
 	if err := b.doSealPendingTxs(handler); err != nil {
-		handler.OnError(common.UnwrapRetryErr(err))
+		handler.OnError(err)
 	}
 }
 
@@ -879,11 +879,11 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 		})
 
 		if err != nil {
-			handler.OnError(common.UnwrapRetryErr(err))
+			handler.OnError(err)
 			continue
 		}
 		if err := b.sealOnePendingTx(handler, txHandler, tx); err != nil {
-			handler.OnError(common.UnwrapRetryErr(err))
+			handler.OnError(err)
 			continue
 		}
 
@@ -892,7 +892,7 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 			return handler.WrapsError(client, err)
 		})
 		if err != nil {
-			handler.OnError(common.UnwrapRetryErr(err))
+			handler.OnError(err)
 			continue
 		}
 
@@ -955,7 +955,7 @@ func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
 			})
 		}
 	}
-	return err
+	return common.UnwrapRetryErr(err)
 }
 
 // monitorContinuousSentTxFailure check if have continuous tx failed
