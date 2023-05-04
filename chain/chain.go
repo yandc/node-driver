@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitlab.bixin.com/mili/node-driver/common"
@@ -218,10 +219,11 @@ func (td *DefaultTxDroppedIn) IsDroppedTx(txByHash *Transaction, err error) bool
 
 // BlockSpider block spider to crawl blocks from chain.
 type BlockSpider struct {
-	detector detector.Detector
-	standby  detector.Detector
-	store    StateStore
-	watchers []Watcher
+	detectors   [2]detector.Detector
+	detectorIdx int32
+	standby     detector.Detector
+	store       StateStore
+	watchers    []Watcher
 
 	concurrencyTxs int
 
@@ -283,10 +285,14 @@ func NewBlockSpider(store StateStore, clients ...Clienter) *BlockSpider {
 	d.Add(nodes...)
 
 	return &BlockSpider{
-		detector: d,
-		store:    store,
-		standby:  detector.NewSimpleDetector(),
+		detectors: [2]detector.Detector{d, nil},
+		store:     store,
+		standby:   detector.NewSimpleDetector(),
 	}
+}
+
+func (b *BlockSpider) detector() detector.Detector {
+	return b.detectors[atomic.LoadInt32(&b.detectorIdx)]
 }
 
 func (b *BlockSpider) SetStateStore(store StateStore) {
@@ -306,7 +312,7 @@ func (b *BlockSpider) SetPrefetched(blocks []*Block, txs []*Transaction) {
 }
 
 func (b *BlockSpider) EnableRoundRobin() {
-	b.detector.EnableRoundRobin()
+	b.detector().EnableRoundRobin()
 }
 
 func (b *BlockSpider) SetHandlingTxsConcurrency(v int) {
@@ -331,18 +337,62 @@ func (b *BlockSpider) Start(handler BlockHandler, concurrentDeltaThr int, maxCon
 
 func (b *BlockSpider) Watch(watchers ...Watcher) {
 	b.watchers = watchers
-	dWatchers := make([]DetectorWatcher, 0, len(watchers))
-	for _, w := range watchers {
+	b.doWatch()
+}
+
+func (b *BlockSpider) doWatch() {
+	dWatchers := make([]DetectorWatcher, 0, len(b.watchers))
+	for _, w := range b.watchers {
 		dWatchers = append(dWatchers, w)
 	}
 	b.WatchDetector(dWatchers...)
 }
 
+func (b *BlockSpider) startDetect() {
+	b.detector().DetectAll()
+	b.detector().StartDetectPlan(3*time.Minute, 0, 3*time.Minute)
+	b.detector().StartDetectPlan(10*time.Minute, 3*time.Minute, 10*time.Minute)
+	b.detector().StartDetectPlan(20*time.Minute, 10*time.Minute, math.MaxInt64)
+
+}
+
+// ReplaceClients assume this invocation will be used in a very low frequency
+// without concurrency.
+func (b *BlockSpider) ReplaceClients(clients ...Clienter) {
+	// Stop the background goroutines that started by current.
+	b.detector().StopDetectPlans()
+
+	// Create a new detector.
+	d := detector.NewSimpleDetector()
+
+	if b.detector().IsRoundRobinEnabled() {
+		d.EnableRoundRobin()
+	}
+
+	nodes := make([]detector.Node, 0, len(clients))
+	for _, c := range clients {
+		nodes = append(nodes, c)
+	}
+	d.Add(nodes...)
+
+	// Store the new detector to the unused position of the array.
+	idx := atomic.LoadInt32(&b.detectorIdx)
+	unusedIdx := (idx + 1) % 2
+	b.detectors[unusedIdx] = d
+
+	// Change the index of current detector to use the new detector.
+	atomic.StoreInt32(&b.detectorIdx, unusedIdx)
+
+	// Receover watchers and detect plans.
+	b.doWatch()
+	b.startDetect()
+}
+
 func (b *BlockSpider) WatchDetector(watchers ...DetectorWatcher) {
 	for _, w := range watchers {
-		b.detector.Watch(w.OnNodesChange)
-		b.detector.WatchFailover(w.OnNodeFailover)
-		b.detector.WatchSuccess(w.OnNodeSuccess)
+		b.detector().Watch(w.OnNodesChange)
+		b.detector().WatchFailover(w.OnNodeFailover)
+		b.detector().WatchSuccess(w.OnNodeSuccess)
 	}
 }
 
@@ -359,11 +409,7 @@ func (b *BlockSpider) StartIndexBlock(handler BlockHandler, concurrentDeltaThr i
 // - concurrentDeltaThr indicates how many blocks delta from chain is safe to get blocks concurrently.
 // - maxConcurrency indicates the max goroutines to get blocks concurrently.
 func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler BlockHandler, concurrentDeltaThr int, maxConcurrency int) {
-	b.detector.DetectAll()
-	go b.detector.StartDetectPlan(3*time.Minute, 0, 3*time.Minute)
-	go b.detector.StartDetectPlan(10*time.Minute, 3*time.Minute, 10*time.Minute)
-	go b.detector.StartDetectPlan(20*time.Minute, 10*time.Minute, math.MaxInt64)
-
+	b.startDetect()
 	for {
 		height, curHeight, err := b.getHeights(handler)
 		if err != nil {
@@ -415,6 +461,7 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 	_END_INNER_LOOP:
 		select {
 		case <-ctx.Done():
+			b.detector().StopDetectPlans()
 			return
 		default:
 		}
@@ -610,7 +657,7 @@ func (b *BlockSpider) concurrentGetBlocks(curHeight, height uint64, handler Bloc
 
 func (b *BlockSpider) getBlock(height uint64, handler BlockHandler) (block *Block, err error) {
 	start := time.Now()
-	nodeURLs := make([]string, 0, b.detector.Len())
+	nodeURLs := make([]string, 0, b.detector().Len())
 	err = b.WithRetry(func(client Clienter) error {
 		nodeURLs = append(nodeURLs, client.URL())
 		if blk, ok := b.prefetchedBlocks[height]; ok {
@@ -942,7 +989,7 @@ func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler
 
 // WithRetry retry.
 func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
-	err := b.detector.WithRetry(b.detector.Len(), func(node detector.Node) error {
+	err := b.detector().WithRetry(b.detector().Len(), func(node detector.Node) error {
 		return fn(node.(Clienter))
 	})
 	if err != nil {

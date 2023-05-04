@@ -59,6 +59,9 @@ type Detector interface {
 	// EnableRoundRobin use all available nodes to invoke fn sequentially with retry.
 	EnableRoundRobin()
 
+	// IsRoundRobinEnabled returns true if Round roubin enabled.
+	IsRoundRobinEnabled() bool
+
 	// Each to iterate over nodes, returns true in the callback to terminate.
 	Each(func(i int, node Node) (terminate bool)) error
 
@@ -82,6 +85,9 @@ type Detector interface {
 
 	// DetectAll detect all nodes.
 	DetectAll()
+
+	// StopDetectPlans stop detecting in background goroutine
+	StopDetectPlans()
 
 	// DetectLastActiveBetween detect nodes that actived between a period.
 	DetectLastActiveBetween(begin, end time.Duration)
@@ -134,6 +140,7 @@ type simple struct {
 	onSuccess  []func(Node)
 	startIdx   int32
 	roundRobin int32
+	ticks      []*time.Ticker
 }
 
 type nodeWrapper struct {
@@ -202,6 +209,7 @@ func NewSimpleDetector() Detector {
 		watchers:   make([]func([]Node), 0, 4),
 		onFailover: make([]func(Node, Node), 0, 4),
 		onSuccess:  make([]func(Node), 0, 4),
+		ticks:      make([]*time.Ticker, 0, 4),
 	}
 }
 
@@ -332,6 +340,10 @@ func (h *simple) EnableRoundRobin() {
 	atomic.StoreInt32(&h.roundRobin, 1)
 }
 
+func (h *simple) IsRoundRobinEnabled() bool {
+	return atomic.LoadInt32(&h.roundRobin) == 1
+}
+
 func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 	if atomic.LoadInt32(&h.roundRobin) == 1 {
 		h.Failover() // failover to use a new node for round robin purpose.
@@ -401,10 +413,19 @@ func (h *simple) WatchSuccess(watchers ...func(Node)) {
 
 func (h *simple) StartDetectPlan(interval time.Duration, lastActiveBegin, lastActiveEnd time.Duration) {
 	tick := time.NewTicker(interval)
-	for {
-		<-tick.C
-		h.DetectLastActiveBetween(lastActiveBegin, lastActiveEnd)
+	h.ticks = append(h.ticks, tick)
+	go func() {
+		for range tick.C {
+			h.DetectLastActiveBetween(lastActiveBegin, lastActiveEnd)
+		}
+	}()
+}
+
+func (h *simple) StopDetectPlans() {
+	for _, t := range h.ticks {
+		t.Stop()
 	}
+	h.ticks = h.ticks[:0]
 }
 
 type toSort struct {
