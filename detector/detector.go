@@ -25,8 +25,8 @@ var (
 
 // Node to detect.
 type Node interface {
-	// Detect run.
-	Detect() error
+	// GetBlockHeight get current block height.
+	GetBlockHeight() (uint64, error)
 
 	// URL returns url of node.
 	URL() string
@@ -99,6 +99,9 @@ type Detector interface {
 	// GetDetectingElapsed get how much time cost to do detecting of node.
 	// NOTE: node have been added before.
 	GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.Duration, err error)
+
+	// GetDetectingHeightDelta returns the delta from leading height.
+	GetDetectingHeightDelta(node Node, refresh ...bool) (delta int64, err error)
 }
 
 // WatchIn is a embeded struct to watch nodes changed by detector.
@@ -141,26 +144,40 @@ type simple struct {
 	startIdx   int32
 	roundRobin int32
 	ticks      []*time.Ticker
+
+	leadingHeight uint64
 }
 
 type nodeWrapper struct {
-	node            Node
-	detectElapsedMS int64
-	workedAt        int64
+	node              Node
+	detectElapsedMS   int64
+	detectHeightDelta int64
+	workedAt          int64
 
 	// set this when node failed but its RetryAfter hasn't changed accorrdingly.
 	defaultRetryAfter    *time.Time
 	numOfContinualFailed uint32
+
+	leadingHeightPtr *uint64
 }
 
-func (w *nodeWrapper) doDetect() error {
+func (w *nodeWrapper) doDetect() (uint64, error) {
 	start := time.Now()
-	if err := w.node.Detect(); err != nil {
+	if height, err := w.node.GetBlockHeight(); err != nil {
 		w.SetDetectElapsed(time.Hour) // max
-		return err
+		return 0, err
+	} else {
+		leadingHeight := atomic.LoadUint64(w.leadingHeightPtr)
+		for leadingHeight < height {
+			if atomic.CompareAndSwapUint64(w.leadingHeightPtr, leadingHeight, height) {
+				leadingHeight = height
+			} else {
+				leadingHeight = atomic.LoadUint64(w.leadingHeightPtr)
+			}
+		}
+		w.SetDetectElapsed(time.Now().Sub(start))
+		return height, nil
 	}
-	w.SetDetectElapsed(time.Now().Sub(start))
-	return nil
 }
 
 func (w *nodeWrapper) WorkedAt() time.Time {
@@ -173,11 +190,32 @@ func (w *nodeWrapper) UpdateWorkedAt() {
 }
 
 func (w *nodeWrapper) DetectElapsed() time.Duration {
-	return time.Duration(time.Millisecond * time.Duration(atomic.LoadInt64(&w.detectElapsedMS)))
+	return time.Millisecond * time.Duration(atomic.LoadInt64(&w.detectElapsedMS))
+}
+
+func (w *nodeWrapper) DetectHeightDelta() int64 {
+	return atomic.LoadInt64(&w.detectHeightDelta)
+}
+
+func (w *nodeWrapper) DetectElapsedWithHeightDeltaFactor() time.Duration {
+	detectedElapsed := w.DetectElapsed()
+
+	heightDeltaFactor := (100 * time.Millisecond) * time.Duration(heightDeltaFactor(w.DetectHeightDelta()))
+	return detectedElapsed + heightDeltaFactor
+}
+
+// https://www.desmos.com/calculator/5ypopdu9x2
+func heightDeltaFactor(delta int64) int64 {
+	x := (delta / 10) // x / 10
+	return x * x * x  // ^3
 }
 
 func (w *nodeWrapper) SetDetectElapsed(elapsed time.Duration) {
 	atomic.StoreInt64(&w.detectElapsedMS, int64(elapsed/time.Millisecond))
+}
+
+func (w *nodeWrapper) SetDetectHeightDelta(heightDelta int64) {
+	atomic.StoreInt64(&w.detectHeightDelta, heightDelta)
 }
 
 func (w *nodeWrapper) retryAfter() time.Time {
@@ -218,7 +256,6 @@ func (h *simple) PickFastest() (Node, error) {
 		return nil, ErrRingEmpty
 	}
 	startIdx := atomic.LoadInt32(&h.startIdx)
-
 	return h.nthNode(int(startIdx)).node, nil
 }
 
@@ -248,7 +285,8 @@ func (h *simple) Add(nodes ...Node) {
 	h.lock.Lock()
 	for _, node := range nodes {
 		w := &nodeWrapper{
-			node: node,
+			node:             node,
+			leadingHeightPtr: &h.leadingHeight,
 		}
 		h.nodes = append(h.nodes, w)
 	}
@@ -353,7 +391,6 @@ func (h *simple) WithRetry(maxRetry int, fn func(Node) error) (ret error) {
 		if i >= maxRetry {
 			return true // terminate
 		}
-
 		// Invoke without error and we shall done the progress.
 		if ret = h.do(node.node, fn); ret == nil {
 			// set detected to avoid detect in plan.
@@ -444,12 +481,12 @@ func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 	h.lock.Lock()
 	// No new node has been added, it's safe to override,
 	// as we're not support remove or replace node yet.
-	if len(h.nodes) != len(nodes) {
+	if len(h.nodes) == len(nodes) {
 		h.nodes = nodes
 	}
 	h.lock.Unlock()
 
-	// Reset the ring starts over.
+	// Reset the ring to the beginning.
 	atomic.StoreInt32(&h.startIdx, 0)
 
 	h.notifyNodeChanged()
@@ -457,6 +494,8 @@ func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 
 func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nodeWrapper {
 	wg := &sync.WaitGroup{}
+
+	nodeHeights := make([]uint64, len(nodes))
 
 	for idx, n := range nodes {
 		workedAt := n.WorkedAt()
@@ -466,19 +505,26 @@ func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nod
 				continue
 			}
 		}
-
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			nw := h.nodes[idx]
-			_ = nw.doDetect()
+			nw := nodes[idx]
+			height, _ := nw.doDetect()
+			nodeHeights[idx] = height
 		}(idx)
 	}
 	wg.Wait()
+	leadingHeight := atomic.LoadUint64(&h.leadingHeight)
+	for idx, node := range nodes {
+		if nodeHeights[idx] != 0 {
+			delta := int64(leadingHeight) - int64(nodeHeights[idx])
+			node.SetDetectHeightDelta(delta)
+		}
+	}
 
 	// Sort by elapsed time in incr order.
 	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].DetectElapsed() < nodes[j].DetectElapsed() // Incr
+		return nodes[i].DetectElapsedWithHeightDeltaFactor() < nodes[j].DetectElapsedWithHeightDeltaFactor() // Incr
 	})
 	return nodes
 }
@@ -536,7 +582,7 @@ func (h *simple) GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.D
 	for _, n := range nodes {
 		if n.node.URL() == node.URL() {
 			if len(refresh) > 0 && refresh[0] {
-				err = n.doDetect()
+				_, err = n.doDetect()
 			}
 
 			elapsed := n.DetectElapsed()
@@ -544,6 +590,20 @@ func (h *simple) GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.D
 				return 0, errors.New("detect failed")
 			}
 			return n.DetectElapsed(), err
+		}
+	}
+	return 0, errors.New("not found")
+}
+
+// GetDetectingHeightDelta returns the delta from leading height.
+func (h *simple) GetDetectingHeightDelta(node Node, refresh ...bool) (elapsed int64, err error) {
+	nodes := h.copyNodeWrappers()
+	for _, n := range nodes {
+		if n.node.URL() == node.URL() {
+			if len(refresh) > 0 && refresh[0] {
+				_, err = n.doDetect()
+			}
+			return n.DetectHeightDelta(), nil
 		}
 	}
 	return 0, errors.New("not found")
