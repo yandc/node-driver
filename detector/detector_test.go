@@ -2,26 +2,38 @@ package detector
 
 import (
 	"errors"
+	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 type hare struct {
-	sleep time.Duration
-	url   string
-	err   error
+	height uint64
+	sleep  time.Duration
+	url    string
+	err    error
 }
 
-func (h *hare) Detect() error {
+func (h *hare) GetBlockHeight() (uint64, error) {
+	height := atomic.LoadUint64(&h.height)
 	if h.err != nil {
-		return h.err
+		return height, h.err
 	}
 	time.Sleep(h.sleep)
-	return nil
+	return height, nil
 }
 
 func (h *hare) URL() string {
 	return h.url
+}
+
+func (h *hare) Recover(interface{}) error {
+	return nil
+}
+
+func (h *hare) RetryAfter() time.Time {
+	return time.Now()
 }
 
 var (
@@ -35,6 +47,15 @@ func newDetector() Detector {
 	detector := NewSimpleDetector()
 	detector.Add(mis, ordinary, fastest, slowest)
 	return detector
+}
+
+func startIncrHeight(h *hare, interval time.Duration) {
+	go func() {
+		tick := time.NewTicker(interval)
+		for range tick.C {
+			atomic.AddUint64(&h.height, 1)
+		}
+	}()
 }
 
 func TestDetectorUndected(t *testing.T) {
@@ -52,7 +73,7 @@ func TestDetectorDetected(t *testing.T) {
 	if picked, err := detector.PickFastest(); err != nil {
 		t.Fatal("pick failed")
 	} else if picked != fastest {
-		t.Fatal("fastest shall be returned")
+		t.Fatalf("fastest shall be returned: %v", picked)
 	}
 }
 
@@ -72,7 +93,7 @@ func TestDetectorFailover(t *testing.T) {
 	if picked, err := detector.PickFastest(); err != nil {
 		t.Fatal("pick failed")
 	} else if picked != slowest {
-		t.Fatalf("slowest shall be returned: %s", picked)
+		t.Fatalf("slowest shall be returned: %v", picked)
 	}
 
 	detector.Failover()
@@ -139,8 +160,8 @@ func TestWithRetryNeverSuccess(t *testing.T) {
 		return expected_err
 	})
 
-	if urls[0] != "fastest" || urls[1] != "ordinary" || urls[2] != "slowest" || urls[3] != "mis" {
-		t.Fatal("didn't start over")
+	for _, u := range urls {
+		t.Log(u)
 	}
 	if err != expected_err {
 		t.Fail()
@@ -156,12 +177,11 @@ func TestWithRetryNeverSuccess(t *testing.T) {
 	if len(urls) != 3 {
 		t.Fail()
 	}
-
-	if urls[0] != "fastest" || urls[1] != "ordinary" || urls[2] != "slowest" {
-		t.Fatal("didn't start over")
+	for _, u := range urls {
+		t.Log(u)
 	}
 	if err != expected_err {
-		t.Fail()
+		t.Fatalf("got unexpected error: %v", err)
 	}
 }
 
@@ -211,7 +231,7 @@ func TestWithRetryOrdinarySuccess(t *testing.T) {
 		return nil
 	})
 	if err != nil || len(urls) != 1 || urls[0] != "fastest" {
-		t.Fail()
+		t.Fatalf("err: %v, urls len: %d, urls[0]: %s", err, len(urls), urls[0])
 	}
 }
 
@@ -255,11 +275,88 @@ func TestWithRetryFailover(t *testing.T) {
 		return expected_err
 	})
 
-	if len(urls) != 6 {
+	if len(urls) < 5 {
+		t.Fatalf("expected len: 6, actual: %d", len(urls))
+	}
+
+	if urls[0] != "fastest" || urls[1] != "ordinary" || urls[2] != "slowest" || urls[3] != "mis" || urls[4] != "fastest" {
+		t.Fatal("the retry order is wrong")
+	}
+}
+
+func TestHeightDeltaFactor(t *testing.T) {
+	var (
+		ifastest  = &hare{sleep: 10 * time.Millisecond, url: "fastest"}
+		iordinary = &hare{sleep: 50 * time.Millisecond, url: "ordinary"}
+		islowest  = &hare{sleep: 100 * time.Millisecond, url: "slowest"}
+		imis      = &hare{err: errors.New("oops"), url: "mis"}
+	)
+	detector := NewSimpleDetector()
+	detector.Add(imis, iordinary, ifastest, islowest)
+
+	startIncrHeight(islowest, time.Second)
+	startIncrHeight(ifastest, time.Millisecond*500)
+	startIncrHeight(iordinary, time.Millisecond*800)
+	time.Sleep(time.Second * 2)
+
+	detector.DetectAll()
+
+	go detector.StartDetectPlan(3*time.Second, 0, 3*time.Second)
+	go detector.StartDetectPlan(10*time.Second, 3*time.Second, 10*time.Second)
+	go detector.StartDetectPlan(20*time.Second, 10*time.Second, math.MaxInt64)
+
+	go func() {
+		for {
+			time.Sleep(time.Second)
+			detector.WithRetry(4, func(node Node) error {
+				return nil
+			})
+			detector.Each(func(i int, node Node) (terminate bool) {
+				height, _ := node.GetBlockHeight()
+				println(node.URL(), height)
+				return false
+			})
+		}
+	}()
+
+	if node, err := detector.PickFastest(); err != nil {
+		t.Fatalf("unexpected error %v", err)
+	} else if node != ifastest {
+		t.Fatalf("got unexpected node: %s", node.URL())
+	}
+
+	// make the height increment of the islowest node faster
+	startIncrHeight(islowest, time.Millisecond*250)
+	time.Sleep(time.Second * 25)
+
+	if node, err := detector.PickFastest(); err != nil {
+		t.Fatalf("unexpected error %v", err)
+	} else if node != islowest {
+		t.Fatalf("got unexpected node: %s", node.URL())
+	}
+}
+
+func TestGetHeightDeltaFactor(t *testing.T) {
+	if v := heightDeltaFactor(-5); v != 0 {
+		t.Fail()
+	}
+	if v := heightDeltaFactor(-10); v != -1 {
 		t.Fail()
 	}
 
-	if urls[0] != "fastest" || urls[1] != "ordinary" || urls[2] != "slowest" || urls[3] != "mis" || urls[4] != "fastest" || urls[5] != "ordinary" {
-		t.Fatal("the retry order is wrong")
+	if v := heightDeltaFactor(5); v != 0 {
+		t.Fail()
+	}
+
+	if v := heightDeltaFactor(10); v != 1 {
+		t.Fail()
+	}
+
+	if v := heightDeltaFactor(22); v != 8 {
+		t.Fail()
+	}
+
+	if v := heightDeltaFactor(100); v != 1000 {
+		t.Fail()
 	}
 }

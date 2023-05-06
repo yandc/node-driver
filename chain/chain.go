@@ -47,9 +47,6 @@ type Clienter interface {
 	// GetBlock fetch block data of the given height.
 	GetBlock(height uint64) (*Block, error)
 
-	// GetBlockHeight get current block height.
-	GetBlockHeight() (uint64, error)
-
 	// GetTxByHash get transaction by given tx hash.
 	GetTxByHash(txHash string) (tx *Transaction, err error)
 }
