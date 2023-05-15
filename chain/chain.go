@@ -999,6 +999,9 @@ func (b *BlockSpider) WithRetry(fn func(client Clienter) error) error {
 			})
 		}
 	}
+	if err == detector.ErrRingEmpty {
+		time.Sleep(time.Second * 3)
+	}
 	return common.UnwrapRetryErr(err)
 }
 
