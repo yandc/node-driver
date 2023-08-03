@@ -102,6 +102,11 @@ type Detector interface {
 
 	// GetDetectingHeightDelta returns the delta from leading height.
 	GetDetectingHeightDelta(node Node, refresh ...bool) (delta int64, err error)
+
+	// GetDetectingHeight returns how much time cost to do detecting of node and
+	// the block height.
+	// NOTE: node have been added before.
+	GetDetectingHeight(node Node, keepCurrent bool) (elapsed time.Duration, height uint64, err error)
 }
 
 // WatchIn is a embeded struct to watch nodes changed by detector.
