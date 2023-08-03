@@ -477,19 +477,42 @@ func (h *simple) DetectAll() {
 func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 	nodes := h.copyNodeWrappers()
 	nodes = h.doDetect(nodes, begin, end)
+	h.applyDetectedNodes(nodes, false)
+}
+
+func (h *simple) applyDetectedNodes(nodes []*nodeWrapper, keepCurrent bool) {
+	// Sort by elapsed time in incr order.
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].DetectElapsedWithHeightDeltaFactor() < nodes[j].DetectElapsedWithHeightDeltaFactor() // Incr
+	})
+
+	currentNode, _ := h.PickFastest()
+	newIdx := 0
+	if keepCurrent && currentNode != nil {
+		for idx, node := range nodes {
+			if node.node == currentNode {
+				newIdx = idx
+			}
+		}
+	}
+
+	var updated bool
 
 	h.lock.Lock()
 	// No new node has been added, it's safe to override,
 	// as we're not support remove or replace node yet.
 	if len(h.nodes) == len(nodes) {
 		h.nodes = nodes
+		updated = true
 	}
 	h.lock.Unlock()
 
-	// Reset the ring to the beginning.
-	atomic.StoreInt32(&h.startIdx, 0)
+	if updated {
+		// Reset the ring to the new node (beginning or current in use node).
+		atomic.StoreInt32(&h.startIdx, int32(newIdx))
 
-	h.notifyNodeChanged()
+		h.notifyNodeChanged()
+	}
 }
 
 func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nodeWrapper {
@@ -521,11 +544,6 @@ func (h *simple) doDetect(nodes []*nodeWrapper, begin, end time.Duration) []*nod
 			node.SetDetectHeightDelta(delta)
 		}
 	}
-
-	// Sort by elapsed time in incr order.
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].DetectElapsedWithHeightDeltaFactor() < nodes[j].DetectElapsedWithHeightDeltaFactor() // Incr
-	})
 	return nodes
 }
 
@@ -577,11 +595,19 @@ func (h *simple) SetPreferedNode(node Node) bool {
 
 // GetDetectingElapsed get how much time cost to do detecting of node.
 // NOTE: node have been added before.
-func (h *simple) GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.Duration, err error) {
+func (h *simple) GetDetectingElapsed(node Node, switches ...bool) (elapsed time.Duration, err error) {
+	var refresh bool
+	var keepCurrent bool
+	if len(switches) >= 1 {
+		refresh = switches[0]
+	}
+	if len(switches) >= 2 {
+		keepCurrent = switches[1]
+	}
 	nodes := h.copyNodeWrappers()
 	for _, n := range nodes {
 		if n.node.URL() == node.URL() {
-			if len(refresh) > 0 && refresh[0] {
+			if refresh {
 				_, err = n.doDetect()
 			}
 
@@ -589,6 +615,7 @@ func (h *simple) GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.D
 			if elapsed == time.Hour {
 				return 0, errors.New("detect failed")
 			}
+			h.applyDetectedNodes(nodes, keepCurrent)
 			return n.DetectElapsed(), err
 		}
 	}
@@ -596,13 +623,23 @@ func (h *simple) GetDetectingElapsed(node Node, refresh ...bool) (elapsed time.D
 }
 
 // GetDetectingHeightDelta returns the delta from leading height.
-func (h *simple) GetDetectingHeightDelta(node Node, refresh ...bool) (elapsed int64, err error) {
+func (h *simple) GetDetectingHeightDelta(node Node, switches ...bool) (elapsed int64, err error) {
+	var refresh bool
+	var keepCurrent bool
+	if len(switches) >= 1 {
+		refresh = switches[0]
+	}
+	if len(switches) >= 2 {
+		keepCurrent = switches[1]
+	}
+
 	nodes := h.copyNodeWrappers()
 	for _, n := range nodes {
 		if n.node.URL() == node.URL() {
-			if len(refresh) > 0 && refresh[0] {
+			if refresh {
 				_, err = n.doDetect()
 			}
+			h.applyDetectedNodes(nodes, keepCurrent)
 			return n.DetectHeightDelta(), nil
 		}
 	}
