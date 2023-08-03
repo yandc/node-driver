@@ -645,3 +645,23 @@ func (h *simple) GetDetectingHeightDelta(node Node, switches ...bool) (elapsed i
 	}
 	return 0, errors.New("not found")
 }
+
+// GetDetectingHeight returns how much time cost to do detecting of node and
+// the block height.
+// NOTE: node have been added before.
+func (h *simple) GetDetectingHeight(node Node, keepCurrent bool) (elapsed time.Duration, height uint64, err error) {
+	nodes := h.copyNodeWrappers()
+	for _, n := range nodes {
+		if n.node.URL() == node.URL() {
+			height, err = n.doDetect()
+			elapsed := n.DetectElapsed()
+			if elapsed == time.Hour {
+				return 0, 0, errors.New("detect failed")
+			}
+
+			h.applyDetectedNodes(nodes, keepCurrent)
+			return n.DetectElapsed(), height, nil
+		}
+	}
+	return 0, 0, errors.New("not found")
+}
