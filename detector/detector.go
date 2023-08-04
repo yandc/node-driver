@@ -669,4 +669,7 @@ func (h *simple) GetDetectingHeight(node Node) (elapsed time.Duration, height ui
 
 func (h *simple) SetKeepCurrentAfterDetecting(v bool) {
 	h.keepCurrent = v
+	if !h.keepCurrent {
+		atomic.StoreInt32(&h.startIdx, 0)
+	}
 }
