@@ -106,7 +106,10 @@ type Detector interface {
 	// GetDetectingHeight returns how much time cost to do detecting of node and
 	// the block height.
 	// NOTE: node have been added before.
-	GetDetectingHeight(node Node, keepCurrent bool) (elapsed time.Duration, height uint64, err error)
+	GetDetectingHeight(node Node) (elapsed time.Duration, height uint64, err error)
+
+	// SetKeepCurrentAfterDetecting whether keep current in use node after detecting.
+	SetKeepCurrentAfterDetecting(bool)
 }
 
 // WatchIn is a embeded struct to watch nodes changed by detector.
@@ -151,6 +154,7 @@ type simple struct {
 	ticks      []*time.Ticker
 
 	leadingHeight uint64
+	keepCurrent   bool
 }
 
 type nodeWrapper struct {
@@ -482,10 +486,10 @@ func (h *simple) DetectAll() {
 func (h *simple) DetectLastActiveBetween(begin, end time.Duration) {
 	nodes := h.copyNodeWrappers()
 	nodes = h.doDetect(nodes, begin, end)
-	h.applyDetectedNodes(nodes, false)
+	h.applyDetectedNodes(nodes)
 }
 
-func (h *simple) applyDetectedNodes(nodes []*nodeWrapper, keepCurrent bool) {
+func (h *simple) applyDetectedNodes(nodes []*nodeWrapper) {
 	// Sort by elapsed time in incr order.
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].DetectElapsedWithHeightDeltaFactor() < nodes[j].DetectElapsedWithHeightDeltaFactor() // Incr
@@ -493,7 +497,7 @@ func (h *simple) applyDetectedNodes(nodes []*nodeWrapper, keepCurrent bool) {
 
 	currentNode, _ := h.PickFastest()
 	newIdx := 0
-	if keepCurrent && currentNode != nil {
+	if h.keepCurrent && currentNode != nil {
 		for idx, node := range nodes {
 			if node.node == currentNode {
 				newIdx = idx
@@ -602,12 +606,8 @@ func (h *simple) SetPreferedNode(node Node) bool {
 // NOTE: node have been added before.
 func (h *simple) GetDetectingElapsed(node Node, switches ...bool) (elapsed time.Duration, err error) {
 	var refresh bool
-	var keepCurrent bool
 	if len(switches) >= 1 {
 		refresh = switches[0]
-	}
-	if len(switches) >= 2 {
-		keepCurrent = switches[1]
 	}
 	nodes := h.copyNodeWrappers()
 	for _, n := range nodes {
@@ -620,7 +620,7 @@ func (h *simple) GetDetectingElapsed(node Node, switches ...bool) (elapsed time.
 			if elapsed == time.Hour {
 				return 0, errors.New("detect failed")
 			}
-			h.applyDetectedNodes(nodes, keepCurrent)
+			h.applyDetectedNodes(nodes)
 			return n.DetectElapsed(), err
 		}
 	}
@@ -630,12 +630,8 @@ func (h *simple) GetDetectingElapsed(node Node, switches ...bool) (elapsed time.
 // GetDetectingHeightDelta returns the delta from leading height.
 func (h *simple) GetDetectingHeightDelta(node Node, switches ...bool) (elapsed int64, err error) {
 	var refresh bool
-	var keepCurrent bool
 	if len(switches) >= 1 {
 		refresh = switches[0]
-	}
-	if len(switches) >= 2 {
-		keepCurrent = switches[1]
 	}
 
 	nodes := h.copyNodeWrappers()
@@ -644,7 +640,7 @@ func (h *simple) GetDetectingHeightDelta(node Node, switches ...bool) (elapsed i
 			if refresh {
 				_, err = n.doDetect()
 			}
-			h.applyDetectedNodes(nodes, keepCurrent)
+			h.applyDetectedNodes(nodes)
 			return n.DetectHeightDelta(), nil
 		}
 	}
@@ -654,7 +650,7 @@ func (h *simple) GetDetectingHeightDelta(node Node, switches ...bool) (elapsed i
 // GetDetectingHeight returns how much time cost to do detecting of node and
 // the block height.
 // NOTE: node have been added before.
-func (h *simple) GetDetectingHeight(node Node, keepCurrent bool) (elapsed time.Duration, height uint64, err error) {
+func (h *simple) GetDetectingHeight(node Node) (elapsed time.Duration, height uint64, err error) {
 	nodes := h.copyNodeWrappers()
 	for _, n := range nodes {
 		if n.node.URL() == node.URL() {
@@ -664,9 +660,13 @@ func (h *simple) GetDetectingHeight(node Node, keepCurrent bool) (elapsed time.D
 				return 0, 0, errors.New("detect failed")
 			}
 
-			h.applyDetectedNodes(nodes, keepCurrent)
+			h.applyDetectedNodes(nodes)
 			return n.DetectElapsed(), height, nil
 		}
 	}
 	return 0, 0, errors.New("not found")
+}
+
+func (h *simple) SetKeepCurrentAfterDetecting(v bool) {
+	h.keepCurrent = v
 }
