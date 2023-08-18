@@ -902,16 +902,19 @@ func (b *BlockSpider) warnSlow(handler BlockHandler, block *Block) {
 }
 
 // SealPendingTransactions load pending transactions and try to seal them.
-func (b *BlockSpider) SealPendingTransactions(handler BlockHandler) {
-	if err := b.doSealPendingTxs(handler); err != nil {
+func (b *BlockSpider) SealPendingTransactions(handler BlockHandler) int {
+	v, err := b.doSealPendingTxs(handler)
+	if err != nil {
 		handler.OnError(err)
 	}
+	return v
 }
 
-func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
+func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) (int, error) {
+	result := 0
 	txs, err := b.store.LoadPendingTxs()
 	if err != nil {
-		return err
+		return result, err
 	}
 
 	for _, tx := range txs {
@@ -939,11 +942,11 @@ func (b *BlockSpider) doSealPendingTxs(handler BlockHandler) error {
 			handler.OnError(err)
 			continue
 		}
-
+		result++
 		b.accumulator.accumulateTx(tx)
 	}
 	b.monitorContinuousSentTxFailure()
-	return nil
+	return result, nil
 }
 
 func (b *BlockSpider) sealOnePendingTx(handler BlockHandler, txHandler TxHandler, tx *Transaction) error {
