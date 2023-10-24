@@ -414,8 +414,6 @@ func (b *BlockSpider) StartIndexBlockWithContext(ctx context.Context, handler Bl
 			continue
 		}
 
-		b.store.StoreNodeHeight(height)
-
 		if curHeight > height {
 			time.Sleep(handler.BlockInterval())
 			continue
@@ -581,6 +579,7 @@ func (b *BlockSpider) getHeights(handler BlockHandler) (height, curHeight uint64
 	if err != nil {
 		return
 	}
+	b.store.StoreNodeHeight(height)
 
 	curHeight, err = b.store.LoadHeight()
 	if err == ErrNoCurrentHeight {
