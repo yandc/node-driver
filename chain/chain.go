@@ -27,6 +27,9 @@ var (
 
 	// ErrUnexpectedBlockNumber got unexpected block number.
 	ErrUnexpectedBlockNumber = errors.New("got unexpected block number")
+
+	// ErrZeroBlockHeight got unexpected zero block height.
+	ErrZeroBlockHeight = errors.New("unexpected 0 height")
 )
 
 // TxType transaction type.
@@ -577,6 +580,10 @@ func (b *BlockSpider) getHeights(handler BlockHandler) (height, curHeight uint64
 	})
 
 	if err != nil {
+		return
+	}
+	if height == 0 {
+		err = ErrZeroBlockHeight
 		return
 	}
 	b.store.StoreNodeHeight(height)
