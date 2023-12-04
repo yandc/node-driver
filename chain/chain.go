@@ -839,6 +839,7 @@ func (b *BlockSpider) composeTxsInBlock(block *Block, handler BlockHandler, opt 
 				}
 				lock.RLock()
 				if err != nil {
+					lock.RUnlock()
 					return
 				}
 				lock.RUnlock()
