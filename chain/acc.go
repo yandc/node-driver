@@ -49,6 +49,11 @@ func (a *sentTxFailedStore) onTx(tx *Transaction) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 	if tx.Result.FailedOnChain {
+		// Previous added
+		if len(a.continuousFailedTxs) > 0 && tx.Hash == a.continuousFailedTxs[len(a.continuousFailedTxs)-1].Hash {
+			return
+		}
+
 		a.continuousFailedTxs = append(a.continuousFailedTxs, tx)
 	} else {
 		a.continuousFailedTxs = nil
